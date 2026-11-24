@@ -5,7 +5,7 @@ import { ToolExecutionComponent, initTheme } from "@earendil-works/pi-coding-age
 import { Text } from "@earendil-works/pi-tui";
 
 import { config } from "../extensions/config/config.ts";
-import { installDefaultMode } from "../extensions/renderer/default-mode.ts";
+import { installDefaultMode, prepareNativeToolRenderer } from "../extensions/renderer/default-mode.ts";
 import { WriteExecutionMetadataStore } from "../extensions/renderer/tool/diff/index.ts";
 import { extractApplyPatchPaths, toolCallSummary } from "../extensions/renderer/tool/names.ts";
 import {
@@ -241,6 +241,136 @@ test("ctx_execute collapsed stays a line count, not raw code dump", () => {
 		assert.doesNotMatch(collapsed, /git log --oneline -5.*git log --oneline -5/s);
 		component.setExpanded(true);
 		assert.match(renderText(component), /def456 second/);
+	} finally {
+		hooks.shutdown();
+		config.mode = previousMode;
+	}
+});
+
+// OMO-shape: nested identity + a renderer child with NO toolDefinition (MCP tool).
+// OMO renders such tools through its raw-JSON fallback; ccstyle must attach a
+// synthetic definition so the compact card renders instead.
+function makeOmoRenderer(identity: any, onFallbackText: (text: string) => void) {
+	const kids = () => {
+		const container: any = {
+			children: [] as any[],
+			addChild(c: any) { container.children.push(c); },
+			removeChild(c: any) {
+				const i = container.children.indexOf(c);
+				if (i >= 0) container.children.splice(i, 1);
+			},
+			detachAll() { container.children = []; },
+		};
+		return container;
+	};
+	const fallbackChild: any = { contentText: true };
+	const selfRenderContainer: any = kids();
+	const contentBox: any = kids();
+	const renderer: any = {
+		selfRenderContainer,
+		contentBox,
+		contentText: {
+			setCustomBgFn() {},
+			setPaddingX() {},
+			setText(text: string) { onFallbackText(text); },
+		},
+		builtInDefinition: undefined,
+		identity,
+		state: undefined,
+		children: [fallbackChild],
+		addChild(child: any) { this.children.push(child); },
+		removeChild(child: any) {
+			const i = this.children.indexOf(child);
+			if (i >= 0) this.children.splice(i, 1);
+		},
+		onToggleExpanded() {},
+		get hasRendererDefinition() {
+			return this.builtInDefinition !== undefined || this.identity.toolDefinition !== undefined;
+		},
+		get renderShell() {
+			return this.identity.toolDefinition?.renderShell ?? this.builtInDefinition?.renderShell ?? "default";
+		},
+		getCallRenderer() {
+			return this.identity.toolDefinition?.renderCall ?? this.builtInDefinition?.renderCall;
+		},
+		getResultRenderer() {
+			return this.identity.toolDefinition?.renderResult ?? this.builtInDefinition?.renderResult;
+		},
+		update(state: any) {
+			this.state = state;
+			if (!this.hasRendererDefinition) {
+				this.contentText.setText("RAW_FALLBACK_JSON");
+				return;
+			}
+			const container = this.renderShell === "self" ? this.selfRenderContainer : this.contentBox;
+			container.detachAll();
+			const callRenderer = this.getCallRenderer();
+			if (callRenderer) {
+				container.addChild(callRenderer(state.args, theme, { args: state.args, isPartial: state.isPartial, expanded: state.expanded, isError: false, toolCallId: identity.toolCallId }));
+			}
+			const resultRenderer = this.getResultRenderer();
+			if (state.result && resultRenderer) {
+				container.addChild(resultRenderer({ content: state.result.content, details: state.result.details }, { isPartial: state.isPartial, expanded: state.expanded }, theme, { args: state.args }));
+			}
+		},
+	};
+	return renderer;
+}
+
+test("OMO definition-less ctx_execute attaches a synthetic definition and renders a compact card", () => {
+	const previousMode = config.mode;
+	config.mode = "on";
+	const hooks = installDefaultMode(new WriteExecutionMetadataStore());
+	try {
+		let fallbackText = "";
+		const identity = { toolName: "ctx_execute", toolCallId: "ctx-omo-defless", cwd: "/tmp" };
+		const renderer = makeOmoRenderer(identity, (text) => { fallbackText += text; });
+		const component: any = {
+			renderer,
+			identity,
+			args: { language: "shell", code: "echo hi" },
+			expanded: false,
+		};
+		assert.equal(renderer.hasRendererDefinition, false);
+		prepareNativeToolRenderer(component);
+		assert.notEqual(renderer.builtInDefinition, undefined);
+		assert.equal(renderer.hasRendererDefinition, true);
+		assert.equal(renderer.children.length, 1);
+		assert.equal(renderer.children[0], renderer.selfRenderContainer);
+		renderer.update({
+			args: { language: "shell", code: "echo hi" },
+			result: { content: [{ type: "text", text: "line one\nline two" }] },
+			isPartial: false,
+			expanded: false,
+		});
+		assert.equal(fallbackText, "");
+		const lines = renderer.selfRenderContainer.children.flatMap((child: any) => child.render(120));
+		assert.equal(lines.length, 1);
+		assert.match(lines[0], /Ctx Execute/);
+		assert.match(lines[0], /shell · echo hi/);
+		assert.match(lines[0], /2 lines returned/);
+		assert.match(lines[0], /click to show more/);
+		assert.doesNotMatch(lines[0], /RAW_FALLBACK|language.*code/);
+	} finally {
+		hooks.shutdown();
+		config.mode = previousMode;
+	}
+});
+
+test("OMO definition-less tool stays on native fallback when mode is off", () => {
+	const previousMode = config.mode;
+	config.mode = "off";
+	const hooks = installDefaultMode(new WriteExecutionMetadataStore());
+	try {
+		let fallbackText = "";
+		const identity = { toolName: "ctx_execute", toolCallId: "ctx-omo-off", cwd: "/tmp" };
+		const renderer = makeOmoRenderer(identity, (text) => { fallbackText += text; });
+		const component: any = { renderer, identity, args: { language: "shell", code: "echo hi" }, expanded: false };
+		prepareNativeToolRenderer(component);
+		assert.equal(renderer.builtInDefinition, undefined);
+		assert.equal(renderer.children.length, 1);
+		renderer.update({ args: { language: "shell", code: "echo hi" }, result: { content: [{ type: "text", text: "x" }] }, isPartial: false, expanded: false });
+		assert.match(fallbackText, /RAW_FALLBACK/);
 	} finally {
 		hooks.shutdown();
 		config.mode = previousMode;

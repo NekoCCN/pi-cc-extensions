@@ -100,7 +100,7 @@ type ToolExpandedBackgroundPatch = {
 const NATIVE_RENDERERS = new WeakSet<object>();
 
 /** OmO draws single calls in an inner renderer; Pi uses the outer card methods. */
-function prepareNativeToolRenderer(component: any): void {
+export function prepareNativeToolRenderer(component: any): void {
 	const renderer = component.renderer;
 	if (!renderer || NATIVE_RENDERERS.has(renderer)) return;
 	NATIVE_RENDERERS.add(renderer);
@@ -130,13 +130,25 @@ function prepareNativeToolRenderer(component: any): void {
 			}
 		};
 	}
-	if (!renderer.hasRendererDefinition) return;
 	if (
 		name !== APPLY_PATCH_TOOL_NAME &&
 		name !== CTX_EXECUTE_TOOL_NAME &&
 		!GOAL_TOOL_NAMES.has(name)
 	) {
 		return;
+	}
+	if (!renderer.hasRendererDefinition) {
+		// OMO has no renderer definition for MCP tools (e.g. ctx_execute); its
+		// native fallback would dump raw JSON. Attach a stub definition plus the
+		// self-render container so the renderer path shows the compact card.
+		const patch = patchRegistry.get<GlobalToolRenderPatch>(GLOBAL_TOOL_RENDER_PATCH);
+		const container = renderer.selfRenderContainer;
+		if (!patch?.active || patch.mode() === "off" || !container) return;
+		renderer.builtInDefinition = { name, renderShell: "self" };
+		for (const child of Array.from(renderer.children ?? [])) {
+			renderer.removeChild(child);
+		}
+		renderer.addChild(container);
 	}
 	const call = renderer.getCallRenderer;
 	const result = renderer.getResultRenderer;
