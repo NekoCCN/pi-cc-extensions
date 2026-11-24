@@ -163,6 +163,81 @@ export const SHELL_TOOL_NAMES = new Set(["bash", "powershell", "pwsh", "sh", "zs
 /** 内置检索工具：pattern 缺失（无效调用）时保留 "…" 占位。 */
 const SEARCH_TOOL_NAMES = new Set(["grep", "find"]);
 
+/** OMO goal 族：原生自带 renderCall/renderResult（彩色状态 + widget），ccstyle 只做紧凑标题，绝不盖掉正文。 */
+export const GOAL_TOOL_NAMES = new Set(["create_goal", "update_goal", "get_goal"]);
+
+/** GPT 补丁工具：原生 preview box 是富渲染，调用行只报路径，展开才看 diff。 */
+export const APPLY_PATCH_TOOL_NAME = "apply_patch";
+
+/** context-mode 沙盒执行：无原生富渲染，调用行只报 language + 首行代码。 */
+export const CTX_EXECUTE_TOOL_NAME = "ctx_execute";
+
+/** 从 apply_patch freeform 文本里提取补丁路径（*** Add/Update/Delete File: <path>）。 */
+export function extractApplyPatchPaths(input: unknown): string[] {
+	if (typeof input !== "string" || !input) return [];
+	const paths: string[] = [];
+	const seen = new Set<string>();
+	const pattern = /^\*{3}\s+(?:Add File|Update File|Delete File):\s*(.+?)\s*$/gm;
+	let match: RegExpExecArray | null;
+	while ((match = pattern.exec(input)) !== null) {
+		const filePath = match[1]!.trim();
+		if (!filePath || seen.has(filePath)) continue;
+		seen.add(filePath);
+		paths.push(filePath);
+	}
+	return paths;
+}
+
+/** goal 调用摘要：状态进标题，reason/objective 压成单行载荷。 */
+function goalCallSummary(toolName: string, title: string, args: any): ToolCallSummary | undefined {
+	const name = toolName.toLowerCase();
+	if (!GOAL_TOOL_NAMES.has(toolName) && !GOAL_TOOL_NAMES.has(name)) return undefined;
+	if (name === "create_goal") {
+		const objective =
+			typeof args?.objective === "string" ? oneLine(args.objective, clipLimit()) : "";
+		return objective
+			? { main: title, detail: "", payload: clip(objective) }
+			: { main: title, detail: "" };
+	}
+	if (name === "update_goal") {
+		const status = typeof args?.status === "string" && args.status ? args.status : "";
+		const reason = typeof args?.reason === "string" ? oneLine(args.reason, clipLimit()) : "";
+		const main = status ? `${title} → ${status}` : title;
+		return reason ? { main, detail: "", payload: clip(reason) } : { main, detail: "" };
+	}
+	return { main: title, detail: "" };
+}
+
+/** apply_patch 调用摘要：只报路径（最多 2 个 + 计数），绝不把整包 patch 摊进标题。 */
+function applyPatchCallSummary(
+	title: string,
+	args: any,
+	cwd?: string,
+): ToolCallSummary | undefined {
+	const input = args?.input;
+	if (typeof input !== "string") return undefined;
+	const paths = extractApplyPatchPaths(input);
+	if (!paths.length) return { main: title, detail: "" };
+	const shown = paths.slice(0, 2).map((filePath) => displayPath(filePath, cwd));
+	const more = paths.length > shown.length ? ` (+${paths.length - shown.length})` : "";
+	return { main: title, detail: "", payload: `${shown.join(", ")}${more}` };
+}
+
+/** ctx_execute 调用摘要：`language · 首行代码`，file 只在无代码时回退显示。 */
+function ctxExecuteCallSummary(
+	title: string,
+	args: any,
+	cwd?: string,
+): ToolCallSummary | undefined {
+	const language = typeof args?.language === "string" && args.language ? args.language : "";
+	const code = typeof args?.code === "string" ? oneLine(args.code, clipLimit()) : "";
+	const file = typeof args?.file === "string" && args.file ? displayPath(args.file, cwd) : "";
+	const body = code || file;
+	if (!body) return { main: title, detail: "" };
+	const prefix = language ? `${language} · ` : "";
+	return { main: title, detail: "", payload: `${prefix}${clip(body)}` };
+}
+
 /**
  * 通用摘要字段优先级：default 与 grouping 共用同一份取值链。
  * 两处曾各自维护，grouping 因此漏掉 command（powershell）和数组型入参；
@@ -259,6 +334,17 @@ export function toolCallSummary(
 	// 内置 codemode：标题只报工具名。脚本很长，塞进行首既挤又读不出重点；
 	// 要看代码展开 Input，要看跑了什么看子调用行。
 	if (name === "codemode") return { main: title, detail: "" };
+
+	// OMO 三件套：goal 只报状态、apply_patch 只报路径、ctx_execute 只报首行代码。
+	// 必须放在通用字段链之前，否则 status/input/code 会被 JSON 回退吞成整包长行。
+	const goalSummary = goalCallSummary(toolName, title, args);
+	if (goalSummary) return goalSummary;
+	if (name === APPLY_PATCH_TOOL_NAME) {
+		return applyPatchCallSummary(title, args, opts.cwd) ?? { main: title, detail: "" };
+	}
+	if (name === CTX_EXECUTE_TOOL_NAME) {
+		return ctxExecuteCallSummary(title, args, opts.cwd) ?? { main: title, detail: "" };
+	}
 
 	const value = (fallback: string, ...keys: string[]) => {
 		const found = keys.map((key) => args[key]).find((item) => typeof item === "string" && item);

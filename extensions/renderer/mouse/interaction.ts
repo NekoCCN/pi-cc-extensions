@@ -14,7 +14,11 @@ import {
 } from "../compact-mode.ts";
 import { isLazyProxyTui } from "../../utils/fullscreen-detect.ts";
 import { setToolTuiFullscreen, isCollapseHintLine } from "../tool/names.ts";
-import { getToolCallId, isNativeExplorationGroup } from "../tool/native-identity.ts";
+import {
+	getToolCallId,
+	getToolResultView,
+	isNativeExplorationGroup,
+} from "../tool/native-identity.ts";
 import {
 	type ExpandedToolIoView,
 	getActiveIoViewFrame,
@@ -39,10 +43,10 @@ import {
 } from "./packets.ts";
 import {
 	collectFullscreenToolCards,
-	componentAtLocalRow,
 	collapsedHintHitbox,
 	fullscreenContentWidth,
 	fullscreenLeafAt,
+	isHyperlinkColumn,
 	isMessageCard,
 	isScrollbarColumnAt,
 } from "./layout.ts";
@@ -357,7 +361,7 @@ const FULLSCREEN_VIEWPORT_PATCH = Symbol("ccstyle.fullscreen-viewport-patch");
  * localRow 是组件 render 内的行号（frame marker / 布局 localRow），供声明按行判。
  */
 function isCollapsedHintRow(component: any, finalLine: string, localRow?: number): boolean {
-	const result = component?.resultRendererComponent;
+	const result = getToolResultView(component);
 	if (typeof result?.isCollapsedHintLine === "function") {
 		return result.isCollapsedHintLine(finalLine, localRow);
 	}
@@ -391,7 +395,7 @@ function blocksOfficialCardToggle(component: any, event: any): boolean {
  * （有且仅保持一个展开：展开前收起其他工具卡），expanded 卡放行官方 press，
  * 位置不变的松手才收起（官方卡经 guard，思考/group/compact 自有卡由扩展结算），
  * 拖动选择文本时不收起；截断头 show-more 单击打开全量预览；回到底部按钮 scrollToBottom。
- * 滚动条列、含 OSC8 链接行、非工具区域、折叠卡正文放行官方。
+ * 滚动条列、OSC8 链接本身、非工具区域、折叠卡正文放行官方。
  */
 function handleFullscreenToolClick(tui: any, packet: SgrMousePacket): boolean {
 	const layout = tui.currentLayout;
@@ -402,11 +406,19 @@ function handleFullscreenToolClick(tui: any, packet: SgrMousePacket): boolean {
 	if (isScrollbarColumnAt(layout, x)) return false;
 	const hit = fullscreenLeafAt(layout, x, y);
 	if (!hit) return false;
+	const column = packet.col - (Number(hit.box.rect?.x) || 0);
+	const line = hit.box.lines?.[hit.localRow];
+	if (typeof line === "string" && isHyperlinkColumn(line, column)) return false;
 	const width = Math.max(1, Number(tui.terminal?.columns) || 80);
 	// 布局树用 scroll 的 contentWidth 渲染内容（滚动条占用时 = width-1）；
 	// 行号定位必须用同一宽度，否则换行差异导致组件行错位。
 	const contentWidth = fullscreenContentWidth(hit.box, width);
-	const target = componentAtLocalRow(hit.box.component, hit.localRow, contentWidth);
+	const target = cachedFullscreenComponentAtRow(
+		layout,
+		hit.box.component,
+		hit.localRow,
+		contentWidth,
+	);
 	if (!target) return false;
 	const component = target.component;
 	if (isNativeExplorationGroup(component)) return false;
@@ -420,8 +432,7 @@ function handleFullscreenToolClick(tui: any, packet: SgrMousePacket): boolean {
 		hideScrollButton(tui);
 		return true;
 	}
-	const line = hit.box.lines?.[hit.localRow];
-	if (typeof line !== "string" || /\x1b]8;[^;]*;/.test(line)) return false;
+	if (typeof line !== "string") return false;
 	const isTool = isToolExecutionComponent(component);
 	const isGroup = component instanceof ToolGroupComponent;
 	const isAssistant = isCompactAssistantComponent(component);
@@ -434,7 +445,7 @@ function handleFullscreenToolClick(tui: any, packet: SgrMousePacket): boolean {
 		const hint = collapsedHintHitbox(line);
 		const onHint = Boolean(
 			hint &&
-				(isThinking || (packet.col >= hint.startCol && packet.col <= hint.endCol)) &&
+				(isThinking || (column >= hint.startCol && column <= hint.endCol)) &&
 				isCollapsedHintRow(component, line, hit.localRow),
 		);
 		if (!onHint) {
@@ -469,18 +480,18 @@ function handleFullscreenToolClick(tui: any, packet: SgrMousePacket): boolean {
 		clearPendingCollapsePress();
 	} else {
 		// 普通工具截断头 show-more：打开全量预览（不收起）。
-		const view = isTool ? component.resultRendererComponent : null;
+		const view = isTool ? getToolResultView(component) : null;
 		if (isExpandedToolIoView(view)) {
 			const plain = stripTerminalSequencesPreservingLayout(line);
 			const section = view.matchShowMoreLine(plain);
-			if (section) {
+			const box = section ? view.showMoreHitbox(plain) : null;
+			if (section && box && column >= box.startCol && column <= box.endCol) {
 				clearPendingCollapsePress();
-				const box = view.showMoreHitbox(plain);
 				return tryOpenToolIoShowMore({
 					kind: "show-more",
 					row: 0,
-					startCol: box?.startCol ?? 1,
-					endCol: box?.endCol ?? 1,
+					startCol: box.startCol,
+					endCol: box.endCol,
 					component,
 					view,
 					section,
@@ -566,14 +577,15 @@ function handleFullscreenToolHover(tui: any, packet: SgrMousePacket): void {
 	const hit = fullscreenLeafAt(layout, x, y);
 	if (hit) {
 		const line = hit.box.lines?.[hit.localRow];
+		const column = packet.col - (Number(hit.box.rect?.x) || 0);
 		// 回到底部按钮：渲染行文本 + 列区间识别（零组件树开销）。
 		if (typeof line === "string" && getScrollButtonVisible() && line.includes("[ ↓")) {
 			const plain = stripTerminalSequencesPreservingLayout(line);
 			const idx = plain.indexOf("[ ↓");
-			if (idx >= 0 && x >= idx && x <= idx + plain.length - 1) {
+			if (idx >= 0 && column > idx && column <= plain.length) {
 				target = { kind: "button" };
 			}
-		} else if (typeof line === "string" && !/\x1b]8;/.test(line)) {
+		} else if (typeof line === "string" && !isHyperlinkColumn(line, column)) {
 			const width = Math.max(1, Number(tui.terminal?.columns) || 80);
 			const contentWidth = fullscreenContentWidth(hit.box, width);
 			// 与点击共用同一定位算法，避免 hover 自建行段与真实组件树错位。
@@ -585,9 +597,7 @@ function handleFullscreenToolHover(tui: any, packet: SgrMousePacket): void {
 			);
 			const component = componentHit?.component;
 			const hintBox = collapsedHintHitbox(line);
-			const overHint = Boolean(
-				hintBox && packet.col >= hintBox.startCol && packet.col <= hintBox.endCol,
-			);
+			const overHint = Boolean(hintBox && column >= hintBox.startCol && column <= hintBox.endCol);
 			if (component instanceof ToolGroupComponent) {
 				if (overHint) target = { kind: "group", component };
 			} else if (component instanceof ThinkingPreviewBlock) {
@@ -597,14 +607,14 @@ function handleFullscreenToolHover(tui: any, packet: SgrMousePacket): void {
 				let view: ExpandedToolIoView | null = null;
 				let section: ToolIoSection | null = null;
 				if (component.expanded) {
-					const resultView = component.resultRendererComponent;
+					const resultView = getToolResultView(component);
 					if (isExpandedToolIoView(resultView)) {
 						view = resultView;
 						const plain = stripTerminalSequencesPreservingLayout(line);
 						const candidate = view.matchShowMoreLine(plain);
 						if (candidate) {
 							const box = view.showMoreHitbox(plain);
-							if (box && x + 1 >= box.startCol && x + 1 <= box.endCol) {
+							if (box && column >= box.startCol && column <= box.endCol) {
 								section = candidate;
 							}
 						}
@@ -686,8 +696,8 @@ function patchFullscreenViewportInput(tui: any): void {
 		if (toolMouseInteractionActive() && tui.mode === "fullscreen") {
 			// 滚动输入（wheel/pageUp/end 等）后同步回到底部按钮显隐；
 			// 官方 viewport 会消费键盘，扩展监听器无法补偿，必须在这里调度。
-			scheduleScrollButtonSync(tui, data);
 			const packets = parseSgrMousePackets(data);
+			scheduleScrollButtonSync(tui, data, packets);
 			// overlay（文本预览/context 弹框，都是真 overlay）可见时：落在
 			// overlay 矩形内的包经 packetInsideOverlay 放行官方
 			// dispatchMouseToOverlay → overlay.handleMouse；overlay 外的包仍

@@ -2,7 +2,7 @@ import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tu
 import { config } from "../../config/config.ts";
 import { isLazyProxyTui } from "../../utils/fullscreen-detect.ts";
 import { keyDisplayText, keybindings } from "../../utils/keybindings.ts";
-import { parseSgrMousePackets } from "./packets.ts";
+import { parseSgrMousePackets, type SgrMousePacket } from "./packets.ts";
 import {
 	OFFICIAL_SCROLL_TO_END_KEY,
 	patchRegistry,
@@ -202,8 +202,14 @@ function scrollBottomShortcutText(): string {
 	return keyDisplayText(SCROLL_BOTTOM_KEYBINDING);
 }
 
-function isScrollNavigationInput(data: string): boolean {
-	if (
+function isScrollNavigationInput(data: string, packets: readonly SgrMousePacket[] | null): boolean {
+	if (packets) {
+		return packets.some((packet) => {
+			const baseButton = packet.code & ~(4 | 8 | 16 | 32);
+			return packet.final === "M" && (baseButton === 64 || baseButton === 65);
+		});
+	}
+	return (
 		matchesKey(data, "pageUp") ||
 		matchesKey(data, "pageDown") ||
 		ZENTUI_PAGE_UP_INPUT.test(data) ||
@@ -219,15 +225,6 @@ function isScrollNavigationInput(data: string): boolean {
 			"tui.altScreen.top",
 			"tui.altScreen.bottom",
 		].some((key) => keybindings().matches(data, key))
-	) {
-		return true;
-	}
-	const packets = parseSgrMousePackets(data);
-	return Boolean(
-		packets?.some((packet) => {
-			const baseButton = packet.code & ~(4 | 8 | 16 | 32);
-			return packet.final === "M" && (baseButton === 64 || baseButton === 65);
-		}),
 	);
 }
 
@@ -244,38 +241,28 @@ export function hideScrollButton(tui: any): void {
 	if (changed) tui.requestRender?.();
 }
 
-export function scheduleScrollButtonSync(tui: any, data: string): void {
+export function scheduleScrollButtonSync(
+	tui: any,
+	data: string,
+	packets = parseSgrMousePackets(data),
+): void {
 	if (
 		!fullscreenLazyTui(tui) ||
 		!dockScrollButtonActive() ||
-		!isScrollNavigationInput(data) ||
-		scrollButtonSyncScheduled
+		scrollButtonSyncScheduled ||
+		!isScrollNavigationInput(data, packets)
 	)
 		return;
 	scrollButtonSyncScheduled = true;
-	const previousLines = tui.previousLines;
-	const check = (attempt: number) => {
+	process.nextTick(() => {
 		scrollButtonSyncScheduled = false;
 		if (getToolMouseTui() !== tui || !dockScrollButtonActive()) return;
-		// Pi renders on its own frame timer. Inspect the resulting viewport before
-		// showing the button so empty or non-scrollable transcripts never flash it.
-		const rendered = tui.previousLines !== previousLines;
-		// fullscreen 下 isFollowingOutput 是即时状态，无需等待官方帧渲染。
-		if (!rendered && attempt < 4 && !fullscreenLazyTui(tui)) {
-			scrollButtonSyncScheduled = true;
-			const timer = setTimeout(() => check(attempt + 1), 16);
-			if (typeof timer === "object" && timer !== null && "unref" in timer) {
-				(timer as { unref: () => void }).unref();
-			}
-			return;
-		}
 		const nextVisible = !isAtTranscriptBottom(tui);
 		if (nextVisible !== getScrollButtonVisible()) {
 			setScrollButtonVisible(nextVisible);
 			tui.requestRender?.();
 		}
-	};
-	process.nextTick(() => check(0));
+	});
 }
 
 export function updateScrollButtonFromInput(tui: any, data: string): void {

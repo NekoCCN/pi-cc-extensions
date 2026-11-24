@@ -17,7 +17,10 @@ import {
 	scheduleSessionRender,
 	TOOL_MOUSE_DISABLE,
 } from "../extensions/renderer/mouse/interaction.ts";
-import { sharedToolHoverState } from "../extensions/renderer/mouse/hover.ts";
+import {
+	cachedFullscreenComponentAtRow,
+	sharedToolHoverState,
+} from "../extensions/renderer/mouse/hover.ts";
 import {
 	getScrollButtonVisible,
 	getScrollButtonWidget,
@@ -1236,6 +1239,56 @@ function fullscreenLayout(lines: string[], component: any) {
 		},
 	};
 }
+
+test("fullscreen show-more uses leaf-local columns and leaves adjacent hyperlinks native", () => {
+	const tui = new FakeFullscreenTui([]);
+	const { tool } = fullscreenToolFixture();
+	const hint = " (5 more lines, ctrl+o to expand)";
+	const file = "\x1b]8;;file:///fixture.txt\x07file\x1b]8;;\x07";
+	tui.currentLayout = fullscreenLayout([file + hint], tool);
+	tui.currentLayout.root.rect.x = 12;
+	tui.currentLayout.root.clip.x = 12;
+	const theme = { fg: (_color: string, text: string) => text };
+	try {
+		installToolMouseInteraction({
+			mode: "tui",
+			hasUI: true,
+			ui: {
+				setWidget(_key: string, factory: any) {
+					factory?.(tui, theme);
+				},
+				onTerminalInput() {
+					return () => undefined;
+				},
+			},
+		});
+		assert.equal(tui.handleViewportInput("\x1b[<0;14;1M"), "official");
+		assert.equal(tool.expanded, false);
+		const col = 12 + "file".length + hint.indexOf("to expand") + 1;
+		assert.deepEqual(tui.handleViewportInput(`\x1b[<0;${col};1M`), { consume: true });
+		assert.equal(tool.expanded, true);
+	} finally {
+		installToolMouseInteraction({});
+	}
+});
+
+test("pointer motion over adjacent rows measures shared children only once per frame", () => {
+	let draws = 0;
+	const paragraph = {
+		render() {
+			draws++;
+			return ["a", "b", "c"];
+		},
+	};
+	const container = { children: [paragraph] };
+	const frame = {};
+	for (let i = 0; i < 3; i++) {
+		assert.equal(cachedFullscreenComponentAtRow(frame, container, i, 80)?.component, paragraph);
+	}
+	assert.equal(draws, 1);
+	assert.equal(cachedFullscreenComponentAtRow({}, container, 0, 80)?.component, paragraph);
+	assert.equal(draws, 2, "a new layout remeasures content");
+});
 
 /** 带滚动视口的布局：线索行 leaf 挂在 scroll box 下，点击要能回溯到视口。 */
 function scrollableLayout(lines: string[], component: any, top: number) {

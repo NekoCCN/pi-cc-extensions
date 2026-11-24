@@ -16,7 +16,7 @@ type RenderToken = (
 	styleContext?: unknown,
 ) => string[];
 
-/** Style parsed headings and add the gap native Markdown omits after lists. */
+/** Style parsed headings, render hyphen bullets as typographic bullets, and add the gap native Markdown omits after lists. */
 export function setMarkdownHeadingStyle(enabled: boolean): void {
 	const prototype = tui.Markdown.prototype;
 	const restore: unknown = Reflect.get(prototype, HEADING_STYLE);
@@ -30,7 +30,35 @@ export function setMarkdownHeadingStyle(enabled: boolean): void {
 	const original: RenderToken = descriptor.value;
 	const clearCache: unknown = Reflect.get(tui, "clearRenderCache");
 	const renderToken: RenderToken = function (token, width, nextTokenType, styleContext) {
-		const lines = original.call(this, token, width, nextTokenType, styleContext);
+		// Hyphen list markers render as typographic bullets. Only the marker glyph
+		// passed to theme.listBullet is swapped, while this one list renders, so
+		// nesting, task checkboxes, ordered markers, fenced code and tables are
+		// untouched. Other unordered markers (+, *) keep their source glyph (Pi
+		// normalizes them to "- " unless preserveOrderedListMarkers is set).
+		const theme = (this as unknown as { theme?: { listBullet?: (marker: string) => string } })
+			.theme;
+		const listBullet = token.type === "list" ? theme?.listBullet : undefined;
+		const bulletize = typeof listBullet === "function";
+		if (bulletize) {
+			try {
+				theme!.listBullet = (marker) =>
+					listBullet(marker.startsWith("- ") ? `• ${marker.slice(2)}` : marker);
+			} catch {
+				// Frozen theme: fall back to the native marker.
+			}
+		}
+		let lines: string[];
+		try {
+			lines = original.call(this, token, width, nextTokenType, styleContext);
+		} finally {
+			if (bulletize) {
+				try {
+					theme!.listBullet = listBullet;
+				} catch {
+					// Frozen theme: nothing was swapped.
+				}
+			}
+		}
 		if (token.type === "heading" && token.depth && width >= 8 && lines[0]) {
 			const level = token.depth;
 			if (level < 3) {

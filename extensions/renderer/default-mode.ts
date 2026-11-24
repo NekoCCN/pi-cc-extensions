@@ -18,6 +18,13 @@ import { setInjectedKeyText } from "../utils/keybindings.ts";
 import { isLiveToolCall, toolCardBgSlot } from "./tool/tool-state.ts";
 import { getMessageDisplayTheme } from "./tool/message-display.ts";
 import { createCcstyleTool } from "./tool/ccstyle-tool.ts";
+import { APPLY_PATCH_TOOL_NAME, CTX_EXECUTE_TOOL_NAME, GOAL_TOOL_NAMES } from "./tool/names.ts";
+import {
+	getToolDefinition,
+	getToolName,
+	getToolResultView,
+	isNativeExplorationGroup,
+} from "./tool/native-identity.ts";
 import type { WriteExecutionMetadataStore } from "./tool/diff/index.ts";
 export { shouldRenderRichDiff } from "./tool/ccstyle-tool.ts";
 
@@ -89,6 +96,51 @@ type ToolExpandedBackgroundPatch = {
 	dispose: () => void;
 };
 
+const NATIVE_RENDERERS = new WeakSet<object>();
+
+/** OmO draws single calls in an inner renderer; Pi uses the outer card methods. */
+function prepareNativeToolRenderer(component: any): void {
+	const renderer = component.renderer;
+	if (!renderer || !renderer.hasRendererDefinition || NATIVE_RENDERERS.has(renderer)) return;
+	const name = getToolName(component);
+	if (
+		name !== APPLY_PATCH_TOOL_NAME &&
+		name !== CTX_EXECUTE_TOOL_NAME &&
+		!GOAL_TOOL_NAMES.has(name)
+	) {
+		return;
+	}
+	const call = renderer.getCallRenderer;
+	const result = renderer.getResultRenderer;
+	if (typeof call !== "function" || typeof result !== "function") return;
+	const definition = getToolDefinition(component);
+	const original = {
+		...definition,
+		renderCall: call.call(renderer),
+		renderResult: result.call(renderer),
+	};
+	const wrapped = () => {
+		const patch = patchRegistry.get<GlobalToolRenderPatch>(GLOBAL_TOOL_RENDER_PATCH);
+		if (!patch?.active || patch.mode() === "off" || preservesOriginalRenderer(original, name)) {
+			return undefined;
+		}
+		let byName = patch.byDefinition.get(original);
+		if (!byName) {
+			byName = new Map();
+			patch.byDefinition.set(original, byName);
+		}
+		if (!byName.has(name)) byName.set(name, patch.wrap(original, name));
+		return byName.get(name);
+	};
+	renderer.getCallRenderer = function () {
+		return wrapped()?.renderCall ?? call.call(this);
+	};
+	renderer.getResultRenderer = function () {
+		return wrapped()?.renderResult ?? result.call(this);
+	};
+	NATIVE_RENDERERS.add(renderer);
+}
+
 function syncToolShell(component: any, shell: "default" | "self"): void {
 	const target = shell === "self" ? component.selfRenderContainer : component.contentBox;
 	if (!target || !Array.isArray(component.children)) return;
@@ -108,10 +160,30 @@ function syncToolShell(component: any, shell: "default" | "self"): void {
 }
 
 function shouldGloballyStyleTool(component: any, patch: GlobalToolRenderPatch): boolean {
+	// 原生 transcript 分组（ExplorationGroup）是边界：不接管、不重组，鼠标也交给它自己。
+	if (isNativeExplorationGroup(component)) {
+		component[COMPONENT_TOOL_RENDER_MODE] = false;
+		return false;
+	}
 	const extensionDefinition = component.toolDefinition;
 	const builtInDefinition = component.builtInToolDefinition;
-	const definition = extensionDefinition ?? builtInDefinition;
-	const toolName = String(component.toolName || definition?.name || "");
+	// OMO Native 5.1.81 把 toolName/toolCallId 藏进 identity / presentationSnapshot；
+	// 只读 flat 字段会把所有原生卡都认成空名 "tool"，后续摘要与分组全错位。
+	const nestedName = getToolName(component ?? {});
+	const flatName =
+		typeof component?.toolName === "string" && component.toolName
+			? component.toolName
+			: getToolDefinition(component)?.name;
+	const toolName =
+		nestedName && nestedName !== "tool"
+			? nestedName
+			: typeof flatName === "string" && flatName
+				? flatName
+				: "";
+	if (!toolName) {
+		component[COMPONENT_TOOL_RENDER_MODE] = false;
+		return false;
+	}
 	// compact 也复用同一套 ccstyle call/result，避免折叠态工具卡回落到 Pi 原生样式。
 	const useCcstyle =
 		patch.mode() !== "off" &&
@@ -121,8 +193,16 @@ function shouldGloballyStyleTool(component: any, patch: GlobalToolRenderPatch): 
 }
 
 function getGloballyStyledTool(component: any, patch: GlobalToolRenderPatch): any {
-	const definition = component.toolDefinition ?? component.builtInToolDefinition;
-	const name = String(component.toolName || definition?.name || "tool");
+	const definition = getToolDefinition(component) ?? component.builtInToolDefinition;
+	const unified = getToolName(component ?? {});
+	const name =
+		unified && unified !== "tool"
+			? unified
+			: String(
+					(typeof component?.toolName === "string" && component.toolName) ||
+						(definition as any)?.name ||
+						"tool",
+				);
 	if (definition && typeof definition === "object") {
 		let byName = patch.byDefinition.get(definition);
 		if (!byName) {
@@ -198,7 +278,7 @@ function disconnectGlobalToolRenderPatch(patch: GlobalToolRenderPatch | undefine
 }
 
 function ioHoverOf(tool: any): string | null {
-	const view = tool?.resultRendererComponent;
+	const view = getToolResultView(tool);
 	if (!view || typeof view.getHoveredSection !== "function") return null;
 	return view.getHoveredSection();
 }
@@ -387,6 +467,7 @@ export function installToolExpandedBackground(): () => void {
 		active: true,
 		prototype,
 		installed: function (this: any) {
+			if (patch.active) prepareNativeToolRenderer(this);
 			original.call(this);
 			if (!patch.active || config.mode === "off" || !this.expanded) return;
 			const theme = getMessageDisplayTheme();

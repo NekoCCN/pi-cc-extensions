@@ -37,6 +37,21 @@ export function collapsedHintHitbox(line: string): { startCol: number; endCol: n
 	return { startCol, endCol: startCol + visibleWidth(match[1]) - 1 };
 }
 
+/** Keep OSC 8 links native without treating the rest of their row as a link. */
+export function isHyperlinkColumn(line: string, column: number): boolean {
+	if (!line.includes("\x1b]8;")) return false;
+	let prior = 0;
+	let offset = 0;
+	let linked = false;
+	for (const match of line.matchAll(/\x1b]8;[^;\n]*;([^\x07\x1b]*)(?:\x07|\x1b\\)/g)) {
+		offset += visibleWidth(line.slice(prior, match.index));
+		if (column <= offset) return linked;
+		linked = match[1] !== "";
+		prior = match.index + match[0].length;
+	}
+	return linked && column <= offset + visibleWidth(line.slice(prior));
+}
+
 /** 布局树点查询：返回 (x,y) 处最深含行 leaf box（屏幕行 → 组件局部行）。 */
 export function fullscreenLeafAt(
 	layout: any,
@@ -94,22 +109,30 @@ export function isScrollbarColumnAt(layout: any, x: number): boolean {
 }
 
 /** compact 展开卡用 childAtRow 映射 thinking；其余按 render 行数下钻。 */
-function nestedChildAtRow(node: any, localRow: number, width: number): any {
+function measureRows(component: any, width: number): number {
+	try {
+		const rendered = component.render?.(width);
+		return Array.isArray(rendered) ? rendered.length : 0;
+	} catch {
+		return 0;
+	}
+}
+
+function nestedChildAtRow(
+	node: any,
+	localRow: number,
+	width: number,
+	rowCount: typeof measureRows,
+): any {
 	if (typeof node?.childAtRow === "function") {
 		return node.childAtRow(localRow, width);
 	}
 	if (!Array.isArray(node?.children)) return null;
 	let offset = 0;
 	for (const child of node.children) {
-		let count = 0;
-		try {
-			const rendered = child.render?.(width);
-			if (Array.isArray(rendered)) count = rendered.length;
-		} catch {
-			count = 0;
-		}
+		const count = rowCount(child, width);
 		if (localRow < offset + count) {
-			return nestedChildAtRow(child, localRow - offset, width);
+			return nestedChildAtRow(child, localRow - offset, width, rowCount);
 		}
 		offset += count;
 	}
@@ -124,6 +147,7 @@ export function componentAtLocalRow(
 	component: any,
 	localRow: number,
 	width: number,
+	rowCount = measureRows,
 ): ComponentRowHit | null {
 	if (isNativeExplorationGroup(component)) return { component, row: localRow };
 	if (component instanceof ToolGroupComponent) {
@@ -137,7 +161,7 @@ export function componentAtLocalRow(
 	if (isCompactAssistantComponent(component)) {
 		// 折叠：整行摘要。展开：先命中面板内 thinking/工具卡/文本，其余（空行）仍归外层卡片。
 		if (component.expanded === true) {
-			const inner = nestedChildAtRow(component, localRow, width);
+			const inner = nestedChildAtRow(component, localRow, width, rowCount);
 			if (inner) {
 				// 展开的 thinking 有自己的展开态：点它只收它自己，不收整块面板。
 				const ownExpandable = inner instanceof ThinkingPreviewBlock && inner.expanded === true;
@@ -160,22 +184,16 @@ export function componentAtLocalRow(
 	if (!Array.isArray(component.children)) return null;
 	let offset = 0;
 	for (const child of component.children) {
-		let lines: string[] = [];
-		try {
-			const rendered = child.render?.(width);
-			if (Array.isArray(rendered)) lines = rendered.map((line) => String(line));
-		} catch {
-			lines = [];
-		}
-		if (localRow < offset + lines.length) {
+		const count = rowCount(child, width);
+		if (localRow < offset + count) {
 			return (
-				componentAtLocalRow(child, localRow - offset, width) ?? {
+				componentAtLocalRow(child, localRow - offset, width, rowCount) ?? {
 					component: child,
 					row: localRow - offset,
 				}
 			);
 		}
-		offset += lines.length;
+		offset += count;
 	}
 	return null;
 }

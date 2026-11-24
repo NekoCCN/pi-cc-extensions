@@ -79,6 +79,17 @@ export function getToolCallId(tool: any): string | undefined {
 	return undefined;
 }
 
+export function getToolResultView(tool: any): any {
+	return tool?.resultRendererComponent ?? tool?.renderer?.resultRendererComponent;
+}
+
+export function getLiveToolResult(tool: any): any {
+	const state = tool?.presentationSnapshot?.state;
+	return (tool?.isPartial ?? state?.isPartial) === true
+		? (tool?.result ?? state?.result)
+		: undefined;
+}
+
 /** Tool definition for Pi flat cards and native identity cards. */
 export function getToolDefinition(tool: any): any {
 	if (tool?.toolDefinition !== undefined) return tool.toolDefinition;

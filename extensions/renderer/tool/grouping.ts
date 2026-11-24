@@ -59,6 +59,7 @@ import {
 import {
 	getToolCallId,
 	getToolDefinition,
+	getLiveToolResult,
 	getToolName,
 	isNativeExplorationGroup,
 	isUnifiedToolExecutionComponent,
@@ -554,7 +555,13 @@ export class ToolGroupComponent extends Container {
 	private _expanded = false;
 	/** 分组是否展开（只读；测试与外部读状态用）。 */
 	get expanded(): boolean {
-		return this._expanded;
+		return this._expanded || this.hasLiveOutput();
+	}
+	private hasLiveOutput(): boolean {
+		return this.children.some((tool) => {
+			const result = getLiveToolResult(tool);
+			return result?.content?.some((block: any) => block.type === "text" && block.text?.trim());
+		});
 	}
 	private hintHovered = false;
 	private readonly patch: Patch;
@@ -612,7 +619,7 @@ export class ToolGroupComponent extends Container {
 	 * 行数计算与 render 保持一致：宽度 width-2 + 空行过滤。
 	 */
 	childAtRow(localRow: number, width: number): { component: any; row: number } | null {
-		if (!this._expanded || localRow < 2) return null;
+		if (!this.expanded || localRow < 2) return null;
 		let offset = 2;
 		const items = groupItems(this.children);
 		for (let index = 0; index < items.length; index++) {
@@ -695,7 +702,9 @@ export class ToolGroupComponent extends Container {
 		if ((this.children as any[]).some(isAnimatingTool)) scheduleGroupAnimation(this.patch);
 		const overallColor = overall === "pending" ? "dim" : overall;
 		// 圆点保持 dim；hover 只高亮可点击文字。
-		const hintText = this._expanded ? collapseHintText() : showMoreHintText();
+		const live = this.hasLiveOutput();
+		const expanded = this._expanded || live;
+		const hintText = live ? "Live output" : expanded ? collapseHintText() : showMoreHintText();
 		const hint = `${fg("dim", "·")} ${fg(this.hintHovered ? "text" : "dim", hintText)}`;
 		const rowWidth = toolViewportWidth(width);
 		// 工具列表让位给展开提示：提示被截断的话，鼠标层要在行尾找 `click to show more`
@@ -710,7 +719,7 @@ export class ToolGroupComponent extends Container {
 				: "";
 		const lines = ["", truncateToWidth(`${head}${nameList}${tail}`, rowWidth, "")];
 		const total = items.length;
-		if (!this._expanded) {
+		if (!expanded) {
 			for (let index = 0; index < total; index++) {
 				lines.push(collapsedGroupLine(items[index], index === total - 1, theme, width));
 			}

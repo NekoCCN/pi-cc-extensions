@@ -62,6 +62,7 @@ import { expandedBodyComponent, insetComponent } from "./tool/result.ts";
 import { isLiveToolCall, scheduleAnimation } from "./tool/tool-state.ts";
 import {
 	getToolCallId,
+	getLiveToolResult,
 	getToolName,
 	isNativeExplorationGroup,
 	isNativeToolExecutionComponent,
@@ -2018,7 +2019,8 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 
 	/** 运行中的工具：已开始且尚无最终结果。 */
 	const isRunningTool = (tool: any): boolean =>
-		tool?.executionStarted === true && (!tool.result || tool.isPartial === true);
+		Boolean(getLiveToolResult(tool)) ||
+		(tool?.executionStarted === true && (!tool.result || tool.isPartial === true));
 
 	/**
 	 * live 围观态：正文 + 摘要行照折叠态渲染，只在摘要行下多一张槽位卡。

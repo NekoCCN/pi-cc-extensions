@@ -107,6 +107,7 @@ export class ExpandedToolIoView {
 
 	/** flushLeft：贴左渲染（外层 Box 负责 1 格 pad）；默认 false 保留 1 格前导空格。 */
 	private flushLeft: boolean;
+	private liveOutput = false;
 	/** 尾部附注（shell 的耗时）。挂到 Output 的 show-more 行上，没有那一行时单独成行。
 	 * 传取值函数时每帧求值，值变了才重画：运行中的秒数要跟着动画 tick 走。 */
 	private footer: string | (() => string | undefined) | undefined;
@@ -221,6 +222,12 @@ export class ExpandedToolIoView {
 		return this.outputBody.trim() ? this.outputBody : "Done";
 	}
 
+	setLiveOutput(live: boolean): void {
+		if (this.liveOutput === live) return;
+		this.liveOutput = live;
+		this.invalidate();
+	}
+
 	setHoveredSection(section: ToolIoSection | null): void {
 		if (this.hoveredSection === section) return;
 		this.hoveredSection = section;
@@ -326,7 +333,9 @@ export class ExpandedToolIoView {
 				pushRailLine(theme.fg("dim", "(empty)"), opts.continued);
 				return false;
 			}
-			const sourceLines = raw.split("\n");
+			const allSources = raw.split("\n");
+			const live = this.liveOutput && opts.section === "output";
+			const sourceLines = live ? allSources.slice(-opts.limit) : allSources;
 			const wrapped: string[] = [];
 			for (const [index, source] of sourceLines.entries()) {
 				if (opts.input) {
@@ -341,26 +350,18 @@ export class ExpandedToolIoView {
 			}
 			// Prefer source-line count so plain multi-line dumps always cap, even when
 			// theme/wrap measurements disagree slightly.
-			const truncated = wrapped.length > opts.limit || sourceLines.length > opts.limit;
-			const visible = truncated ? wrapped.slice(0, Math.min(opts.limit, wrapped.length)) : wrapped;
+			const visible = live ? wrapped.slice(-opts.limit) : wrapped.slice(0, opts.limit);
+			const hidden = allSources.length - sourceLines.length + wrapped.length - visible.length;
 			for (const line of visible) pushRailLine(line, opts.continued);
-			if (truncated) {
-				const hidden = Math.max(0, wrapped.length - visible.length);
-				if (hidden > 0) {
-					// 省略号已经表达了「还有」，计数前不再加 +。
-					const note = opts.footerNote ? theme.fg("dim", ` · ${opts.footerNote}`) : "";
-					// hover 只高亮文字，圆点保持 dim（与 group hint 一致）。
-					const more =
-						theme.fg("dim", " ·") +
-						theme.fg(
-							this.hoveredSection === opts.section ? "text" : "dim",
-							` ${showMoreHintText()}`,
-						);
-					pushRailLine(theme.fg("dim", `… ${hidden} more lines`) + note + more, opts.continued);
-					this.showMoreHeaderRows[opts.section] = lines.length - 1;
-				}
+			if (hidden > 0) {
+				const note = opts.footerNote ? theme.fg("dim", ` · ${opts.footerNote}`) : "";
+				const more =
+					theme.fg("dim", " ·") +
+					theme.fg(this.hoveredSection === opts.section ? "text" : "dim", ` ${showMoreHintText()}`);
+				pushRailLine(theme.fg("dim", `… ${hidden} more lines`) + note + more, opts.continued);
+				this.showMoreHeaderRows[opts.section] = lines.length - 1;
 			}
-			return truncated;
+			return hidden > 0;
 		};
 
 		const hasInput = this.inputBody.trim().length > 0;

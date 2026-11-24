@@ -21,6 +21,8 @@ import { countWriteDiffStats, writeStatsInCollapsedBody } from "./diff/diff-rend
 import { renderRichToolResult, type WriteExecutionMetadataStore } from "./diff/index.ts";
 import { mcpToolTitle } from "./mcp-title.ts";
 import {
+	APPLY_PATCH_TOOL_NAME,
+	GOAL_TOOL_NAMES,
 	humanizeToolLabel,
 	renderToolSummary,
 	SHELL_TOOL_NAMES,
@@ -79,6 +81,21 @@ export function shouldRenderRichDiff(
 	isError: boolean,
 ): boolean {
 	return mode === "on" && !isError && (toolName === "edit" || toolName === "write");
+}
+
+/** apply_patch 无原生时的折叠回退：preview 有文件数就报 `N files (+A -D)`，单文件报路径。 */
+function applyPatchPreviewSummary(result: any): string | undefined {
+	const preview = result?.details?.preview;
+	if (!preview || !Array.isArray(preview.files) || preview.files.length === 0) return undefined;
+	const files = preview.files;
+	const added = typeof preview.added === "number" ? preview.added : 0;
+	const removed = typeof preview.removed === "number" ? preview.removed : 0;
+	if (files.length === 1) {
+		const file = files[0];
+		const filePath = typeof file?.filePath === "string" && file.filePath ? file.filePath : "1 file";
+		return `${filePath} (+${added} -${removed})`;
+	}
+	return `${files.length} files (+${added} -${removed})`;
 }
 
 function renderDefault(tool: any, slot: "renderCall" | "renderResult", args: any[], fallback = "") {
@@ -212,8 +229,11 @@ function renderRunningExpandedResult(toolName: string, result: any, context: any
 		context,
 		true,
 	);
-	if (isExpandedToolIoView(view) && SHELL_TOOL_NAMES.has(toolName)) {
-		view.setFooter(() => shellDurationText(toolName, context, true) || undefined);
+	if (isExpandedToolIoView(view)) {
+		view.setLiveOutput(true);
+		if (SHELL_TOOL_NAMES.has(toolName)) {
+			view.setFooter(() => shellDurationText(toolName, context, true) || undefined);
+		}
 	}
 	return view;
 }
@@ -477,10 +497,27 @@ export function createCcstyleTool(
 			}
 
 			const expanded = isToolExpanded(options, context);
+			if (!options?.isPartial && isExpandedToolIoView(context?.lastComponent)) {
+				context.lastComponent.setLiveOutput(false);
+			}
 			const isError = Boolean(options?.isError || context?.isError);
+			const lowerName = toolName.toLowerCase();
+			const isGoalTool = GOAL_TOOL_NAMES.has(toolName) || GOAL_TOOL_NAMES.has(lowerName);
+			const isApplyPatch = lowerName === APPLY_PATCH_TOOL_NAME;
+			const hasNativeResult = typeof originalTool?.renderResult === "function";
+			// Keep native goal receipts and patch previews; the CCStyle title is sufficient.
+			if ((isGoalTool || isApplyPatch) && hasNativeResult) {
+				if (!options?.isPartial) setToolVisualState(context, isError ? "error" : "success");
+				return renderDefault(
+					originalTool,
+					"renderResult",
+					[result, options, theme, context],
+					textFromResult(result, expanded),
+				);
+			}
 			// Agent：running 转交原渲染器（spinner/activity 只有它有）；其余画 ↳ 摘要行。
 			// toolName 大小写宽松匹配：上游改名也不静默失效。
-			if (toolName.toLowerCase() === AGENT_TOOL_NAME.toLowerCase()) {
+			if (lowerName === AGENT_TOOL_NAME.toLowerCase()) {
 				const agentResult = renderAgentResult(
 					originalTool,
 					result,
@@ -550,7 +587,9 @@ export function createCcstyleTool(
 			}
 			if (options?.isPartial) {
 				// 运行中也给和结束后同一份 Input / Output：命令全文与已产生的输出。
-				if (expanded) return renderRunningExpandedResult(toolName, result, context, theme);
+				if (expanded || textFromResult(result).trim()) {
+					return renderRunningExpandedResult(toolName, result, context, theme);
+				}
 				// 折叠态保持 3 格：与完成后的 `   ↳ …` 同列，工具跑完那行不横跳。
 				if (context?.state) context.state.ccstyleIoView = undefined;
 				return renderRunningCollapsedResult({ toolName, context, theme });
@@ -597,21 +636,28 @@ export function createCcstyleTool(
 				if (taskResult) return taskResult;
 			}
 			const tasks = !isError && toolName === "TaskList" ? parseTaskList(text) : [];
+			// apply_patch 无原生时的回退：折叠行报文件数而非 N lines，避免与 Input 补丁重复计数。
+			const applyPatchFallback =
+				!isError && lowerName === APPLY_PATCH_TOOL_NAME
+					? applyPatchPreviewSummary(result)
+					: undefined;
 			const rendered = tasks.length
 				? taskListSummary(tasks)
-				: collapsedResultSummary({ result, toolName, text, isError });
+				: (applyPatchFallback ?? collapsedResultSummary({ result, toolName, text, isError }));
 			const expandable = !expanded && (tasks.length > 0 || hasExpandableDetail(text, args));
 			const hintText = showMoreHintText();
 			const hintPrefix = expandable ? theme.fg("dim", " · ") : "";
 			const hint = expandable ? hintPrefix + theme.fg("dim", hintText) : "";
 			const hoveredHint = expandable ? hintPrefix + theme.fg("text", hintText) : "";
 			if (expanded) {
+				// apply_patch 回退展开只看 Output：Input 整包补丁与 preview 同体，并排即双份。
+				const expandedArgs = lowerName === APPLY_PATCH_TOOL_NAME ? undefined : args;
 				const view = renderExpandedToolResult(
 					text || "",
 					theme,
 					Boolean(isError),
 					context?.lastComponent,
-					args,
+					expandedArgs,
 					context,
 					true, // mode=on：贴左，由外层 Box(1,1) 提供 1 格 padding
 				);

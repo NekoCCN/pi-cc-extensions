@@ -152,6 +152,26 @@ test("运行中展开：耗时挂在输出截断的 show-more 行上", () => {
 		assert.match(footer!, /… 20 more lines · \d+(ms|\.[0-9]s|[0-9]+m [0-9]+s) · .*to show more$/);
 	});
 });
+test("unopened live tool follows the latest chunk, then folds on final result", () => {
+	runInMode(() => {
+		const tool = makeTool("bash", "auto-live-tail", { command: "printf fixture" });
+		const update = (text: string, isPartial: boolean) =>
+			tool.updateResult({ content: [{ type: "text", text }], isError: false }, isPartial);
+		tool.markExecutionStarted();
+		update("first chunk", true);
+		assert.match(render(tool).join("\n"), /Output\n\s+first chunk/);
+		const output = `first chunk\n${"intermediate\n".repeat(20)}last chunk`;
+		update(output, true);
+		const live = render(tool).join("\n");
+		assert.match(live, /last chunk/);
+		assert.doesNotMatch(live, /first chunk/);
+		assert.equal(tool.rendererState.ccstyleIoView.getOutputBody(), output);
+		update(output, false);
+		assert.doesNotMatch(render(tool).join("\n"), /└ Output|last chunk/);
+		tool.setExpanded(true);
+		assert.match(render(tool).join("\n"), /first chunk/);
+	});
+});
 
 test("运行中展开：纯空白输出仍是 Pending…，非空输出保留缩进", () => {
 	runInMode(() => {

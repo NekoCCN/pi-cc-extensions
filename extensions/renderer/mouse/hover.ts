@@ -87,6 +87,27 @@ export function setHoveredToolIo(
 /** hover 与点击共用组件定位；同一布局下按容器/宽度/行缓存，避免 motion 重复渲染。 */
 let fullscreenHoverCacheLayout: unknown = null;
 let fullscreenHoverComponentCache = new WeakMap<object, Map<string, ComponentRowHit | null>>();
+let fullscreenRowCounts = new WeakMap<object, Map<number, number>>();
+
+function measuredRows(component: any, width: number): number {
+	if (!component || typeof component !== "object") return 0;
+	let sizes = fullscreenRowCounts.get(component);
+	if (!sizes) {
+		sizes = new Map();
+		fullscreenRowCounts.set(component, sizes);
+	}
+	const cached = sizes.get(width);
+	if (cached !== undefined) return cached;
+	let count = 0;
+	try {
+		const lines = component.render?.(width);
+		if (Array.isArray(lines)) count = lines.length;
+	} catch {
+		// An unrenderable child has no current hit rows.
+	}
+	sizes.set(width, count);
+	return count;
+}
 
 export function cachedFullscreenComponentAtRow(
 	layout: any,
@@ -98,6 +119,7 @@ export function cachedFullscreenComponentAtRow(
 	if (fullscreenHoverCacheLayout !== layout) {
 		fullscreenHoverCacheLayout = layout;
 		fullscreenHoverComponentCache = new WeakMap();
+		fullscreenRowCounts = new WeakMap();
 	}
 	let rows = fullscreenHoverComponentCache.get(container);
 	if (!rows) {
@@ -106,7 +128,7 @@ export function cachedFullscreenComponentAtRow(
 	}
 	const key = `${width}:${row}`;
 	if (rows.has(key)) return rows.get(key) ?? null;
-	const hit = componentAtLocalRow(container, row, width);
+	const hit = componentAtLocalRow(container, row, width, measuredRows);
 	rows.set(key, hit);
 	return hit;
 }

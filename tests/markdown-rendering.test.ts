@@ -171,7 +171,7 @@ test("separates headings from adjacent lists without changing the Markdown sourc
 	const rendered = text(enabled.create(source));
 
 	assert.equal(enabled.apply(source), source);
-	assert.match(rendered, /- First item *\n *\n─ Follow-up.*with code *\n *\n1\. Next item/);
+	assert.match(rendered, /• First item *\n *\n─ Follow-up.*with code *\n *\n1\. Next item/);
 	assert.match(rendered, /1\. Next item *\n *\n─ Final section/);
 	assert.match(rendered, /- Literal item *\n +## Literal heading/);
 	assert.match(rendered, /│ one │ two │/);
@@ -183,13 +183,13 @@ test("separates headings from adjacent lists without changing the Markdown sourc
 test("restores native heading spacing when the extension unloads", async () => {
 	const host = runtime({ enableMarkdownEnhance: true, enableTableCopy: false });
 	const source = "- Item\n## Heading";
-	assert.match(text(host.create(source)), /- Item *\n *\n─ Heading/);
+	assert.match(text(host.create(source)), /• Item *\n *\n─ Heading/);
 
 	await host.stop();
 	assert.match(text(host.create(source)), /- Item *\nHeading/);
 
 	await host.start();
-	assert.match(text(host.create(source)), /- Item *\n *\n─ Heading/);
+	assert.match(text(host.create(source)), /• Item *\n *\n─ Heading/);
 	await host.stop();
 });
 
@@ -362,5 +362,85 @@ test("transcript browsing and non-TUI sessions leave table rendering native", as
 		} finally {
 			await other.stop();
 		}
+	}
+});
+
+test("hyphen lists render typographic bullets while ordered items stay untouched", async () => {
+	const host = runtime({ enableMarkdownEnhance: true, enableTableCopy: false });
+	const source = [
+		"- Alpha",
+		"- Beta",
+		"  - nested",
+		"- [ ] open task",
+		"- [x] done task",
+		"",
+		"1. first",
+		"2. second",
+		"",
+		"```text",
+		"- literal",
+		"```",
+		"",
+		TABLE,
+		"",
+		"prose with a hyphen - like this",
+	].join("\n");
+	try {
+		const rendered = text(host.create(source));
+		assert.match(rendered, /• Alpha/);
+		assert.match(rendered, /• Beta/);
+		assert.match(rendered, / {4}• nested/);
+		assert.match(rendered, /• \[ \] open task/);
+		assert.match(rendered, /• \[x\] done task/);
+		assert.doesNotMatch(rendered, /- Alpha/);
+		assert.match(rendered, /1\. first/);
+		assert.match(rendered, /2\. second/);
+		assert.match(rendered, /- literal/);
+		assert.match(rendered, /│ one │ two │/);
+		assert.match(rendered, /prose with a hyphen - like this/);
+	} finally {
+		await host.stop();
+	}
+});
+
+test("bullet is off when the heading-style patch is off", async () => {
+	const host = runtime({ enableMarkdownEnhance: false, enableTableCopy: false });
+	try {
+		const rendered = text(host.create("- Alpha\n- Beta"));
+		assert.match(rendered, /- Alpha/);
+		assert.match(rendered, /- Beta/);
+		assert.doesNotMatch(rendered, /•/);
+	} finally {
+		await host.stop();
+	}
+});
+
+test("non-hyphen unordered markers keep their source glyph", async () => {
+	const host = runtime({ enableMarkdownEnhance: true, enableTableCopy: false });
+	try {
+		// Pi normalizes +/* to "- " unless preserveOrderedListMarkers is set (user
+		// messages); only hyphen markers become bullets in that namespace.
+		const preserved = new Markdown("* star\n+ plus\n- dash", 0, 0, theme, undefined, {
+			preserveOrderedListMarkers: true,
+		});
+		const rendered = text(preserved);
+		assert.match(rendered, /\* star/);
+		assert.match(rendered, /\+ plus/);
+		assert.match(rendered, /• dash/);
+		assert.doesNotMatch(rendered, /• star/);
+	} finally {
+		await host.stop();
+	}
+});
+
+test("bullet glyph keeps the native continuation alignment", async () => {
+	const host = runtime({ enableMarkdownEnhance: true, enableTableCopy: false });
+	const narrow = Markdown.prototype.render.call(host.create("- Alpha"), 40);
+	const rendered = narrow.map(stripTerminalSequences);
+	try {
+		assert.match(rendered.join("\n"), /• Alpha/);
+		// • and - both have visible width 1, so wrapping is unchanged.
+	} finally {
+		await host.stop();
 	}
 });
