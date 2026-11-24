@@ -133,7 +133,10 @@ function prepareNativeToolRenderer(component: any): void {
 		return byName.get(name);
 	};
 	renderer.getCallRenderer = function () {
-		return wrapped()?.renderCall ?? call.call(this);
+		const renderCall = wrapped()?.renderCall;
+		if (!renderCall) return call.call(this);
+		return (args: any, theme: any, context: any) =>
+			renderCall(args, theme, { ...context, result: this.state?.result });
 	};
 	renderer.getResultRenderer = function () {
 		return wrapped()?.renderResult ?? result.call(this);

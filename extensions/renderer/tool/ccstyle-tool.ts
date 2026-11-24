@@ -22,6 +22,7 @@ import { renderRichToolResult, type WriteExecutionMetadataStore } from "./diff/i
 import { mcpToolTitle } from "./mcp-title.ts";
 import {
 	APPLY_PATCH_TOOL_NAME,
+	CTX_EXECUTE_TOOL_NAME,
 	GOAL_TOOL_NAMES,
 	humanizeToolLabel,
 	renderToolSummary,
@@ -374,6 +375,11 @@ export function createCcstyleTool(
 	const defaultTitle = label === toolName ? humanizeToolLabel(label) : label;
 	// MCP 工具直接用 adapter 暴露的真实工具名，不做人性化
 	const title = mcpToolTitle({ toolName, definition: originalTool }) ?? defaultTitle;
+	const lowerName = toolName.toLowerCase();
+	const isGoalTool = GOAL_TOOL_NAMES.has(lowerName);
+	const isApplyPatch = lowerName === APPLY_PATCH_TOOL_NAME;
+	const isContextExecute = lowerName === CTX_EXECUTE_TOOL_NAME;
+	const foldToCall = isGoalTool || isApplyPatch || isContextExecute;
 
 	return {
 		...originalTool,
@@ -450,6 +456,21 @@ export function createCcstyleTool(
 			}
 			const extraText = writeStatsText || summary.detail;
 			const extraStyled = writeStatsStyled || theme.fg("dim", summary.detail);
+			const fold = foldToCall && !context?.expanded && !context?.isPartial && context?.result;
+			const receipt = !fold
+				? ""
+				: isApplyPatch
+					? applyPatchPreviewSummary(context.result)
+					: isContextExecute
+						? collapsedResultSummary({
+								result: context.result,
+								toolName,
+								text: textFromResult(context.result),
+								isError: Boolean(context.isError),
+							})
+						: undefined;
+			const receiptText = receipt ? ` · ${receipt}` : "";
+			const hintText = fold ? ` · ${showMoreHintText()}` : "";
 			let cachedWidth: number | undefined;
 			let cachedLine: string | undefined;
 			let cachedIcon: string | undefined;
@@ -469,12 +490,15 @@ export function createCcstyleTool(
 						0,
 						viewportWidth - visibleWidth(icon) - 1 - (expanded ? 0 : 1),
 					);
-					const mainWidth = Math.max(0, callWidth - visibleWidth(extraText));
+					const hint = visibleWidth(hintText) < callWidth - 8 ? hintText : "";
+					const receiptSuffix =
+						visibleWidth(receiptText) < callWidth - visibleWidth(hint) - 12 ? receiptText : "";
+					const mainWidth = Math.max(0, callWidth - visibleWidth(extraText + receiptSuffix + hint));
 					cachedWidth = width;
 					cachedIcon = icon;
 					// 路径按最终可用宽度中间截断，避免整行二次截断隐藏文件名。
 					cachedLine = truncateToWidth(
-						`${lead}${icon} ${renderToolSummary(summary, mainWidth, theme.fg.bind(theme))}${extraStyled}`,
+						`${lead}${icon} ${renderToolSummary(summary, mainWidth, theme.fg.bind(theme))}${extraStyled}${theme.fg("dim", receiptSuffix)}${theme.fg(isToolCallHovered(context?.toolCallId) ? "text" : "dim", hint)}`,
 						viewportWidth,
 						"",
 					);
@@ -501,9 +525,12 @@ export function createCcstyleTool(
 				context.lastComponent.setLiveOutput(false);
 			}
 			const isError = Boolean(options?.isError || context?.isError);
-			const lowerName = toolName.toLowerCase();
-			const isGoalTool = GOAL_TOOL_NAMES.has(toolName) || GOAL_TOOL_NAMES.has(lowerName);
-			const isApplyPatch = lowerName === APPLY_PATCH_TOOL_NAME;
+			if (foldToCall && !options?.isPartial && !expanded) {
+				setToolVisualState(context, isError ? "error" : "success");
+				if (context?.state) context.state.ccstyleIoView = undefined;
+				// Return an empty component, not undefined: the latter triggers native fallback output.
+				return { render: () => [], invalidate() {} };
+			}
 			const hasNativeResult = typeof originalTool?.renderResult === "function";
 			// Keep native goal receipts and patch previews; the CCStyle title is sufficient.
 			if ((isGoalTool || isApplyPatch) && hasNativeResult) {
@@ -636,14 +663,9 @@ export function createCcstyleTool(
 				if (taskResult) return taskResult;
 			}
 			const tasks = !isError && toolName === "TaskList" ? parseTaskList(text) : [];
-			// apply_patch 无原生时的回退：折叠行报文件数而非 N lines，避免与 Input 补丁重复计数。
-			const applyPatchFallback =
-				!isError && lowerName === APPLY_PATCH_TOOL_NAME
-					? applyPatchPreviewSummary(result)
-					: undefined;
 			const rendered = tasks.length
 				? taskListSummary(tasks)
-				: (applyPatchFallback ?? collapsedResultSummary({ result, toolName, text, isError }));
+				: collapsedResultSummary({ result, toolName, text, isError });
 			const expandable = !expanded && (tasks.length > 0 || hasExpandableDetail(text, args));
 			const hintText = showMoreHintText();
 			const hintPrefix = expandable ? theme.fg("dim", " · ") : "";

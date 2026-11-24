@@ -116,8 +116,14 @@ test("goal result preserves the native dedicated renderer", () => {
 		component.updateResult({ content: [{ type: "text", text: "done" }], isError: false });
 		component.setExpanded(false);
 		const output = renderText(component);
-		assert.match(output, /native goal widget/);
+		assert.match(output, /Update Goal → complete.*to show more/);
+		assert.equal(output.trim().split("\n").length, 1);
+		assert.doesNotMatch(output, /native goal widget/);
 		assert.doesNotMatch(output, /1 line returned/);
+		component.setExpanded(true);
+		assert.match(renderText(component), /native goal widget ✓ complete/);
+		component.setExpanded(false);
+		assert.doesNotMatch(renderText(component), /native goal widget/);
 	} finally {
 		hooks.shutdown();
 		config.mode = previousMode;
@@ -152,7 +158,9 @@ test("apply_patch result preserves single native box instead of duplicated bodie
 		} as any);
 		component.setExpanded(false);
 		const collapsed = renderText(component);
-		assert.match(collapsed, /Applied patch/);
+		assert.match(collapsed, /Apply Patch.*to show more/);
+		assert.equal(collapsed.trim().split("\n").length, 1);
+		assert.doesNotMatch(collapsed, /Applied patch/);
 		assert.doesNotMatch(stripAnsi(collapsed), /Begin Patch/);
 		component.setExpanded(true);
 		const expanded = renderText(component);
@@ -194,6 +202,7 @@ test("apply_patch fallback without native renderer stays compact", () => {
 		component.setExpanded(false);
 		const collapsed = renderText(component);
 		assert.match(collapsed, /2 files/);
+		assert.equal(collapsed.trim().split("\n").length, 1);
 		assert.doesNotMatch(collapsed, /Begin Patch/);
 		component.setExpanded(true);
 		const expanded = renderText(component);
@@ -226,7 +235,12 @@ test("ctx_execute collapsed stays a line count, not raw code dump", () => {
 		component.setExpanded(false);
 		const collapsed = renderText(component);
 		assert.match(collapsed, /2 lines returned/);
+		assert.match(collapsed, /to show more/);
+		assert.equal(collapsed.trim().split("\n").length, 1);
+		assert.doesNotMatch(collapsed, /a1b2c3|def456/);
 		assert.doesNotMatch(collapsed, /git log --oneline -5.*git log --oneline -5/s);
+		component.setExpanded(true);
+		assert.match(renderText(component), /def456 second/);
 	} finally {
 		hooks.shutdown();
 		config.mode = previousMode;
