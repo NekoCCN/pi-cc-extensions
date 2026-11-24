@@ -56,6 +56,18 @@ const BRANCH_KIND: DisplayKind = {
 	body: (component) => String(component.message?.summary ?? ""),
 };
 
+export function messageDisplayPreview(component: any): { title: string; body: string } | undefined {
+	const kind =
+		component instanceof SkillInvocationMessageComponent
+			? SKILL_KIND
+			: component instanceof CompactionSummaryMessageComponent
+				? COMPACTION_KIND
+				: component instanceof BranchSummaryMessageComponent
+					? BRANCH_KIND
+					: undefined;
+	return kind && { title: kind.title(component), body: kind.body(component) };
+}
+
 function ensureHintHover(component: any): void {
 	if (typeof component.setHintHovered === "function") return;
 	component.setHintHovered = function (this: any, hovered: boolean) {

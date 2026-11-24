@@ -57,7 +57,7 @@ export function expandedBodyComponent(component: any): any {
 	return wrapped;
 }
 
-function rawTextFromResult(result: any): string {
+export function rawTextFromResult(result: any): string {
 	return Array.isArray(result?.content)
 		? result.content
 				.filter((item: any) => item?.type === "text")

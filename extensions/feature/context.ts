@@ -8,7 +8,7 @@ import {
 	formatSkillsForPrompt,
 	getMarkdownTheme,
 } from "@earendil-works/pi-coding-agent";
-import { Key, Markdown, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
+import { Key, Markdown, matchesKey, Text, visibleWidth } from "@earendil-works/pi-tui";
 import { type Color, rgbColor } from "@earendil-works/pi-tui";
 import { padLine } from "../utils/format.ts";
 import { setInjectedKeybindings } from "../utils/keybindings.ts";
@@ -124,6 +124,7 @@ export async function showTextPreview(
 	ctx: Pick<ExtensionCommandContext, "ui">,
 	title: string,
 	rawContent: string,
+	options?: { literal?: boolean },
 ): Promise<void> {
 	const content = normalizePreviewText(rawContent);
 	activeContextOverlays++;
@@ -152,7 +153,9 @@ export async function showTextPreview(
 					| undefined;
 				let scrollbarDragOffset: number | null = null;
 				let screenOrigin = { col: 0, row: 0 };
-				const markdownView = new Markdown(content, 0, 0, getMarkdownTheme());
+				const preview = options?.literal
+					? new Text(content, 0, 0)
+					: new Markdown(content, 0, 0, getMarkdownTheme());
 
 				const scrollTo = (nextOffset: number): void => {
 					const next = Math.max(0, Math.min(nextOffset, Math.max(0, totalLines - pageSize)));
@@ -294,7 +297,7 @@ export async function showTextPreview(
 
 				return {
 					invalidate() {
-						markdownView.invalidate();
+						preview.invalidate();
 					},
 					handleInput(data: string) {
 						if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
@@ -345,7 +348,7 @@ export async function showTextPreview(
 							availableHeight,
 						);
 						pageSize = Math.max(1, viewportHeight - 6);
-						const wrapped = markdownView.render(bodyWidth);
+						const wrapped = preview.render(bodyWidth);
 						totalLines = wrapped.length;
 						scrollOffset = Math.min(scrollOffset, Math.max(0, totalLines - pageSize));
 						// hitbox 用弹框局部坐标（0-based）：title 固定第 1 行，esc/copy

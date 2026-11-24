@@ -1240,6 +1240,38 @@ function fullscreenLayout(lines: string[], component: any) {
 	};
 }
 
+test("fullscreen tool hint opens a dialog without expanding the transcript card", () => {
+	const tui = new FakeFullscreenTui([]);
+	const { tool, collapsedLines } = fullscreenToolFixture();
+	tool.toolName = "bash";
+	tool.result = { content: [{ type: "text", text: "full fixture output" }] };
+	tui.currentLayout = fullscreenLayout(collapsedLines, tool);
+	let opened = 0;
+	try {
+		installToolMouseInteraction({
+			mode: "tui",
+			hasUI: true,
+			ui: {
+				setWidget(_key: string, factory: any) {
+					factory?.(tui, { fg: (_color: string, text: string) => text });
+				},
+				onTerminalInput() {
+					return () => undefined;
+				},
+				async custom() {
+					opened++;
+				},
+			},
+		});
+		assert.deepEqual(tui.handleViewportInput("\x1b[<0;22;3M"), { consume: true });
+		assert.equal(opened, 1);
+		assert.equal(tool.expanded, false);
+		assert.deepEqual(tool.render(), collapsedLines);
+	} finally {
+		installToolMouseInteraction({});
+	}
+});
+
 test("fullscreen show-more uses leaf-local columns and leaves adjacent hyperlinks native", () => {
 	const tui = new FakeFullscreenTui([]);
 	const { tool } = fullscreenToolFixture();

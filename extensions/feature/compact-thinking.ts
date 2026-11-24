@@ -387,6 +387,10 @@ export class ThinkingPreviewBlock implements Component {
 		return expandedThinking.has(`${this.messageTimestamp}:${this.runStartIndex}`);
 	}
 
+	getPreviewText(): string {
+		return this.text;
+	}
+
 	setExpanded(expanded: boolean): void {
 		const key = `${this.messageTimestamp}:${this.runStartIndex}`;
 		if (expanded) expandedThinking.add(key);

@@ -8,6 +8,7 @@ import {
 } from "../../utils/patch-keys.ts";
 import { ToolGroupComponent } from "../tool/grouping.ts";
 import {
+	getCompactRoundPreview,
 	isCompactAssistantComponent,
 	markCompactRoundToolExpanded,
 	setHoveredCompactAssistant,
@@ -19,6 +20,9 @@ import {
 	getToolResultView,
 	isNativeExplorationGroup,
 } from "../tool/native-identity.ts";
+import { messageDisplayPreview } from "../tool/message-display.ts";
+import { toolPreviewBody, toolPreviewGroup, toolPreviewTitle } from "../tool/preview.ts";
+import { subagentNotificationPreview } from "../tool/subagent-notification.ts";
 import {
 	type ExpandedToolIoView,
 	getActiveIoViewFrame,
@@ -163,6 +167,45 @@ function tryOpenToolIoShowMore(region: InteractionRegion): boolean {
 	return true;
 }
 
+function tryOpenCardPreview(component: any): boolean {
+	const ui = toolMouseUi;
+	if (typeof ui?.custom !== "function") return false;
+	let title: string;
+	let body: string;
+	let literal = true;
+	if (component instanceof ToolGroupComponent) {
+		title = "Multiple Tools";
+		body = toolPreviewGroup(component.children);
+	} else if (isToolExecutionComponent(component)) {
+		title = toolPreviewTitle(component);
+		body = toolPreviewBody(component);
+	} else if (isCompactAssistantComponent(component)) {
+		const round = getCompactRoundPreview(component);
+		if (!round) return false;
+		title = "Turn details";
+		body = [...round.thinking, toolPreviewGroup(round.tools)].filter(Boolean).join("\n\n");
+	} else if (component instanceof ThinkingPreviewBlock) {
+		title = "Thinking";
+		body = component.getPreviewText();
+	} else {
+		const message = messageDisplayPreview(component);
+		if (message) {
+			({ title, body } = message);
+			literal = false;
+		} else {
+			const notification = subagentNotificationPreview(component);
+			if (notification === undefined) return false;
+			title = "Subagent details";
+			body = notification;
+		}
+	}
+	clearPendingCollapsePress();
+	void showTextPreview({ ui }, title, body || "(no details available)", { literal }).catch(() => {
+		ui.notify?.("Could not open details", "warning");
+	});
+	return true;
+}
+
 function updateToolSummaryHover(tui: any, packet: SgrMousePacket): void {
 	if (!isSgrIdleMotion(packet)) return;
 	const region = interactionRegionAt(packet);
@@ -285,6 +328,7 @@ function toggleToolAtMouseClick(tui: any, packet: SgrMousePacket): boolean {
 		rememberCollapsePress(component, component, packet);
 		return true;
 	}
+	if (tryOpenCardPreview(component)) return true;
 	component.setExpanded(true);
 	clearPendingCollapsePress();
 	setHoveredToolCallId(null);
@@ -453,6 +497,7 @@ function handleFullscreenToolClick(tui: any, packet: SgrMousePacket): boolean {
 			if (target.owner) rememberCollapsePress(target.owner, target.owner, packet);
 			return false;
 		}
+		if (tryOpenCardPreview(component)) return true;
 		// single-expand：展开前收起其他已展开工具卡/group。
 		const others: any[] = [];
 		collectFullscreenToolCards(hit.box.component, others);

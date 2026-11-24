@@ -723,10 +723,19 @@ export function setHoveredCompactAssistant(component: any): boolean {
  * 整回合展开卡内的工具被点击展开时调用：让 compact 的强制折叠放行这一个，
  * 并把同一回合里其他展开的工具收回去（保持单开）。非 round 内工具是空操作。
  */
-let roundToolExpansion: { markUserExpanded(tool: any): void } | undefined;
+let roundToolExpansion:
+	| {
+			markUserExpanded(tool: any): void;
+			preview(component: any): { tools: any[]; thinking: string[] } | undefined;
+	  }
+	| undefined;
 
 export function markCompactRoundToolExpanded(tool: any): void {
 	roundToolExpansion?.markUserExpanded(tool);
+}
+
+export function getCompactRoundPreview(component: any) {
+	return roundToolExpansion?.preview(component);
 }
 
 /**
@@ -1545,7 +1554,24 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 		}
 		explicitRoundToolIds.add(id);
 	};
-	roundToolExpansion = { markUserExpanded: markRoundToolUserExpanded };
+	roundToolExpansion = {
+		markUserExpanded: markRoundToolUserExpanded,
+		preview(component) {
+			const anchor = component.roundAnchor ?? component;
+			const round = allRounds().find((item) => item.anchor === anchor);
+			if (!round) return;
+			const owned = roundClaimedToolIds(round);
+			const tools = [...trackedToolComponents].filter(
+				(tool) => owned.delete(componentToolId(tool)) && !OUTER_TOOLS.has(componentToolName(tool)),
+			);
+			const thinking = [...round.messages.values()].flatMap((message) =>
+				(Array.isArray(message?.content) ? message.content : [])
+					.filter((part: any) => part?.type === "thinking" && typeof part.thinking === "string")
+					.map((part: any) => part.thinking),
+			);
+			return { tools, thinking };
+		},
+	};
 
 	const roundMessages = (round: CompactRound): any[] => [
 		...round.messages.values(),

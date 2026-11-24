@@ -274,6 +274,12 @@ export function paddedBackgroundRow(
 	return `${bgAnsi}${stable}\x1b[49m`;
 }
 
+/** A collapsed header or tree row already includes its left inset. */
+export function collapsedToolBackground(theme: any, slot: string, line: string, width: number) {
+	if (typeof theme?.bg !== "function" || width < 3) return line;
+	return paddedBackgroundRow(theme, slot, stripLeadingSpaces(line, 1), width);
+}
+
 function backgroundAnsi(theme: any, slot: string): string {
 	if (typeof theme?.bg !== "function") return "";
 	return theme.getBgAnsi?.(slot) || theme.bg(slot, "").match(/^\x1b\[[0-?]*[ -/]*[@-~]/)?.[0] || "";
@@ -707,21 +713,33 @@ export class ToolGroupComponent extends Container {
 		const hintText = live ? "Live output" : expanded ? collapseHintText() : showMoreHintText();
 		const hint = `${fg("dim", "·")} ${fg(this.hintHovered ? "text" : "dim", hintText)}`;
 		const rowWidth = toolViewportWidth(width);
+		const summaryWidth = Math.max(1, rowWidth - (typeof theme?.bg === "function" ? 1 : 0));
 		// 工具列表让位给展开提示：提示被截断的话，鼠标层要在行尾找 `click to show more`
 		// 就找不到，整张卡在窄宽度下点不开。名字截断后子行里仍能看全。
 		const head = ` ${fg(overallColor, "●")} ${label}: ${countText}`;
 		const tail = ` ${hint}`;
-		const listRoom = rowWidth - visibleWidth(head) - visibleWidth(tail) - 3;
+		const listRoom = summaryWidth - visibleWidth(head) - visibleWidth(tail) - 3;
 		// 连一个工具名都放不下就不放列表：退化成 `· …` 只会把行撑爆。
 		const nameList =
 			names.size > 1 && listRoom >= 4
 				? ` ${fg("dim", `· ${headTruncateToWidth(toolNameList(items), listRoom)}`)}`
 				: "";
-		const lines = ["", truncateToWidth(`${head}${nameList}${tail}`, rowWidth, "")];
+		const lines = ["", truncateToWidth(`${head}${nameList}${tail}`, summaryWidth, "")];
 		const total = items.length;
 		if (!expanded) {
 			for (let index = 0; index < total; index++) {
 				lines.push(collapsedGroupLine(items[index], index === total - 1, theme, width));
+			}
+			if (typeof theme?.bg === "function") {
+				const slot = TOOL_CARD_BG_SLOT[overall];
+				const inset = collapsedToolBackground(theme, slot, "", width);
+				lines.splice(
+					1,
+					lines.length - 1,
+					inset,
+					...lines.slice(1).map((line) => collapsedToolBackground(theme, slot, line, width)),
+					inset,
+				);
 			}
 			if (counts.pending === 0) this.storeSettledCache(width, lines);
 			return lines;

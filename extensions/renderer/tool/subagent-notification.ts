@@ -329,6 +329,10 @@ class FinishedSubagentView implements Component {
 		return this._expanded;
 	}
 
+	getPreviewText(): string {
+		return subagentPreviewText(this.subagents);
+	}
+
 	/** 鼠标层的单击展开/收起（与消息卡同一条路径）。 */
 	setExpanded(expanded: boolean): void {
 		this._expanded = expanded;
@@ -409,6 +413,29 @@ export function isSubagentNotificationComponent(value: unknown): boolean {
 		value instanceof CustomMessageComponent &&
 		(value as any).message?.customType === SUBAGENT_NOTIFICATION_TYPE
 	);
+}
+
+function subagentPreviewText(subagents: FinishedSubagent[]): string {
+	return subagents
+		.map((agent) =>
+			[
+				[agent.id, agent.status, ...agent.stats].filter(Boolean).join(" · "),
+				agent.description,
+				agent.error,
+				agent.resultPreview,
+				agent.outputFile,
+			]
+				.filter(Boolean)
+				.join("\n"),
+		)
+		.join("\n\n───\n\n");
+}
+
+export function subagentNotificationPreview(component: any): string | undefined {
+	if (isSubagentNotificationView(component)) return component.getPreviewText();
+	if (isSubagentNotificationComponent(component)) {
+		return subagentPreviewText(messageSubagents(component.message));
+	}
 }
 
 type RendererLookup = (this: unknown, customType: string) => MessageRenderer | undefined;
