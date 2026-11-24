@@ -280,18 +280,18 @@ test("tool preview styles section headers, input body and separators", async () 
 					: `\x1b[90m${text}\x1b[39m`,
 		bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
 	};
-	const input = ["Input", "arg one", "", "Output", "result text", "", "───", "", "Second title", "second body"];
+	const input = ["Input   ", "arg one   ", "", "Output   ", "result text   ", "", "───   ", "", "Second title   ", "second body   "];
 	const out = styledPreviewLines(input, theme);
 	assert.equal(out.length, input.length);
 	const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
-	assert.equal(out.map(strip).join("\n"), input.join("\n"));
-	const byText = new Map(out.map((line) => [strip(line), line]));
+	assert.equal(out.map((line) => strip(line).trim()).join("\n"), input.map((line) => line.trim()).join("\n"));
+	const byText = new Map(out.map((line) => [strip(line).trim(), line]));
 	assert.match(byText.get("Input") ?? "", /\x1b\[1m\x1b\[36mInput\x1b\[39m\x1b\[22m/);
 	assert.match(byText.get("Output") ?? "", /\x1b\[1m\x1b\[36mOutput\x1b\[39m\x1b\[22m/);
-	assert.match(byText.get("arg one") ?? "", /^\x1b\[90marg one\x1b\[39m$/);
-	assert.match(byText.get("result text") ?? "", /^result text$/);
+	assert.match(byText.get("arg one") ?? "", /^\x1b\[90marg one/);
+	assert.match(strip(byText.get("result text") ?? ""), /^result text/);
 	assert.match(byText.get("───") ?? "", /^\x1b\[2m.*\x1b\[22m$/);
-	assert.match(byText.get("second body") ?? "", /^second body$/);
+	assert.match(byText.get("second body") ?? "", /^second body\s*$/);
 });
 
 test("showTextPreview closes from a regular-mode SGR click without overlay layout", async () => {

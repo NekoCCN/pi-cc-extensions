@@ -109,12 +109,15 @@ export function styledPreviewLines(lines: string[], theme: any): string[] {
 	if (typeof theme?.fg !== "function") return lines;
 	let section: "input" | "output" | undefined;
 	return lines.map((line) => {
-		if (line === "Input" || line === "Output") {
-			section = line.toLowerCase() as "input" | "output";
-			return theme.bold(theme.fg("accent", line));
+		// Text.render 把行填充到宽度，章节头带尾部空格；按 trim 后内容识别，
+		// 缩进由下游 padLine 按可见宽度重算。
+		const trimmed = line.trim();
+		if (trimmed === "Input" || trimmed === "Output") {
+			section = trimmed.toLowerCase() as "input" | "output";
+			return theme.bold(theme.fg("accent", trimmed));
 		}
-		if (line.startsWith("───")) return theme.fg("dim", line);
-		if (section === "input" && line.trim() !== "") return theme.fg("muted", line);
+		if (trimmed.startsWith("───")) return theme.fg("dim", trimmed);
+		if (section === "input" && trimmed !== "") return theme.fg("muted", line);
 		return line;
 	});
 }
