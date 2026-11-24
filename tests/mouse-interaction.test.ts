@@ -1272,6 +1272,40 @@ test("fullscreen tool hint opens a dialog without expanding the transcript card"
 	}
 });
 
+test("a split transcript uses its painted width to locate the modal owner after wrapped text", () => {
+	const tui = new FakeFullscreenTui([]);
+	const { tool } = fullscreenToolFixture();
+	tool.toolName = "bash";
+	const hint = "✓ bash · click to show more";
+	const paragraph = { render: (width: number) => (width < 70 ? ["first", "wrapped"] : ["first"]) };
+	const transcript = { children: [paragraph, tool] };
+	const layout = fullscreenLayout(["first", "wrapped", hint], transcript);
+	layout.root.rect.width = 60;
+	layout.root.clip.width = 60;
+	tui.currentLayout = layout;
+	let opened = 0;
+	try {
+		installToolMouseInteraction({
+			mode: "tui",
+			hasUI: true,
+			ui: {
+				setWidget(_key: string, factory: any) {
+					factory?.(tui, { fg: (_color: string, text: string) => text });
+				},
+				onTerminalInput: () => () => undefined,
+				async custom() {
+					opened++;
+				},
+			},
+		});
+		assert.deepEqual(tui.handleViewportInput("\x1b[<0;15;3M"), { consume: true });
+		assert.equal(opened, 1);
+		assert.equal(tool.expanded, false);
+	} finally {
+		installToolMouseInteraction({});
+	}
+});
+
 test("fullscreen show-more uses leaf-local columns and leaves adjacent hyperlinks native", () => {
 	const tui = new FakeFullscreenTui([]);
 	const { tool } = fullscreenToolFixture();

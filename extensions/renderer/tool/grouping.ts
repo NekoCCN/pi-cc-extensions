@@ -5,6 +5,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 	type Component,
+	type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
 import { config } from "../../config/config.ts";
 import { TOOL_CARD_BG_SLOT, toolCardStatus } from "./tool-state.ts";
@@ -22,6 +23,7 @@ import {
 	codemodeSummaryParts,
 } from "./codemode.ts";
 import { getToolMouseTui } from "../mouse/scroll.ts";
+import { tryOpenCardPreview } from "../mouse/interaction.ts";
 import { mcpToolTitle } from "./mcp-title.ts";
 import { collapseHintText, isToolTuiFullscreen, showMoreHintText } from "./names.ts";
 import {
@@ -272,12 +274,6 @@ export function paddedBackgroundRow(
 	const stable = bgAnsi ? row.replace(/\x1b\[(?:0)?m/g, (reset) => reset + bgAnsi) : row;
 	if (!bgAnsi) return typeof theme?.bg === "function" ? theme.bg(slot, stable) : row;
 	return `${bgAnsi}${stable}\x1b[49m`;
-}
-
-/** A collapsed header or tree row already includes its left inset. */
-export function collapsedToolBackground(theme: any, slot: string, line: string, width: number) {
-	if (typeof theme?.bg !== "function" || width < 3) return line;
-	return paddedBackgroundRow(theme, slot, stripLeadingSpaces(line, 1), width);
 }
 
 function backgroundAnsi(theme: any, slot: string): string {
@@ -620,6 +616,29 @@ export class ToolGroupComponent extends Container {
 		this.hintHovered = hovered;
 	}
 
+	override handleMouse(event: TuiMouseEvent) {
+		// The visible group header is row 1; its preceding blank and children are not links.
+		if (
+			event.type === "click" &&
+			event.button === "left" &&
+			event.y === 1 &&
+			!this.expanded &&
+			tryOpenCardPreview(this)
+		) {
+			return {
+				handled: true as const,
+				target: {
+					component: this,
+					originX: 0,
+					originY: 0,
+					width: event.width,
+					height: event.height,
+				},
+			};
+		}
+		return super.handleMouse(event);
+	}
+
 	/**
 	 * 展开时按局部行定位内部组件（null = 行属于 group 自身：空行/头行/尾行）。
 	 * 行数计算与 render 保持一致：宽度 width-2 + 空行过滤。
@@ -713,33 +732,26 @@ export class ToolGroupComponent extends Container {
 		const hintText = live ? "Live output" : expanded ? collapseHintText() : showMoreHintText();
 		const hint = `${fg("dim", "·")} ${fg(this.hintHovered ? "text" : "dim", hintText)}`;
 		const rowWidth = toolViewportWidth(width);
-		const summaryWidth = Math.max(1, rowWidth - (typeof theme?.bg === "function" ? 1 : 0));
 		// 工具列表让位给展开提示：提示被截断的话，鼠标层要在行尾找 `click to show more`
 		// 就找不到，整张卡在窄宽度下点不开。名字截断后子行里仍能看全。
 		const head = ` ${fg(overallColor, "●")} ${label}: ${countText}`;
 		const tail = ` ${hint}`;
-		const listRoom = summaryWidth - visibleWidth(head) - visibleWidth(tail) - 3;
+		const plainHeader = ` ● ${label}: ${groupCountText(counts, (_color, text) => text)}`;
+		const header =
+			visibleWidth(plainHeader) + visibleWidth(` · ${hintText}`) > rowWidth
+				? truncateToWidth(head, Math.max(1, rowWidth - visibleWidth(tail)), "…")
+				: head;
+		const listRoom = rowWidth - visibleWidth(header) - visibleWidth(tail) - 3;
 		// 连一个工具名都放不下就不放列表：退化成 `· …` 只会把行撑爆。
 		const nameList =
 			names.size > 1 && listRoom >= 4
 				? ` ${fg("dim", `· ${headTruncateToWidth(toolNameList(items), listRoom)}`)}`
 				: "";
-		const lines = ["", truncateToWidth(`${head}${nameList}${tail}`, summaryWidth, "")];
+		const lines = ["", truncateToWidth(`${header}${nameList}${tail}`, rowWidth, "")];
 		const total = items.length;
 		if (!expanded) {
 			for (let index = 0; index < total; index++) {
 				lines.push(collapsedGroupLine(items[index], index === total - 1, theme, width));
-			}
-			if (typeof theme?.bg === "function") {
-				const slot = TOOL_CARD_BG_SLOT[overall];
-				const inset = collapsedToolBackground(theme, slot, "", width);
-				lines.splice(
-					1,
-					lines.length - 1,
-					inset,
-					...lines.slice(1).map((line) => collapsedToolBackground(theme, slot, line, width)),
-					inset,
-				);
 			}
 			if (counts.pending === 0) this.storeSettledCache(width, lines);
 			return lines;

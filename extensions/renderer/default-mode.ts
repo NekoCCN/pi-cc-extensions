@@ -18,6 +18,7 @@ import { setInjectedKeyText } from "../utils/keybindings.ts";
 import { isLiveToolCall, toolCardBgSlot } from "./tool/tool-state.ts";
 import { getMessageDisplayTheme } from "./tool/message-display.ts";
 import { createCcstyleTool } from "./tool/ccstyle-tool.ts";
+import { tryOpenCardPreview } from "./mouse/interaction.ts";
 import { APPLY_PATCH_TOOL_NAME, CTX_EXECUTE_TOOL_NAME, GOAL_TOOL_NAMES } from "./tool/names.ts";
 import {
 	getToolDefinition,
@@ -101,8 +102,35 @@ const NATIVE_RENDERERS = new WeakSet<object>();
 /** OmO draws single calls in an inner renderer; Pi uses the outer card methods. */
 function prepareNativeToolRenderer(component: any): void {
 	const renderer = component.renderer;
-	if (!renderer || !renderer.hasRendererDefinition || NATIVE_RENDERERS.has(renderer)) return;
+	if (!renderer || NATIVE_RENDERERS.has(renderer)) return;
+	NATIVE_RENDERERS.add(renderer);
 	const name = getToolName(component);
+	const nativeToggle = renderer.onToggleExpanded;
+	if (typeof nativeToggle === "function") {
+		renderer.onToggleExpanded = () => {
+			if (!component.expanded && tryOpenCardPreview(component)) return;
+			nativeToggle();
+		};
+	}
+	const update = renderer.update;
+	if (typeof update === "function") {
+		renderer.update = function (state: any) {
+			update.call(this, state);
+			const patch = patchRegistry.get<GlobalToolRenderPatch>(GLOBAL_TOOL_RENDER_PATCH);
+			if (
+				patch?.active &&
+				patch.mode() !== "off" &&
+				state?.result &&
+				!state.expanded &&
+				!state.isPartial &&
+				!preservesOriginalRenderer(getToolDefinition(component), name, this.builtInDefinition)
+			) {
+				this.contentBox?.setBgFn?.(undefined);
+				this.contentText?.setCustomBgFn?.(undefined);
+			}
+		};
+	}
+	if (!renderer.hasRendererDefinition) return;
 	if (
 		name !== APPLY_PATCH_TOOL_NAME &&
 		name !== CTX_EXECUTE_TOOL_NAME &&
@@ -141,7 +169,6 @@ function prepareNativeToolRenderer(component: any): void {
 	renderer.getResultRenderer = function () {
 		return wrapped()?.renderResult ?? result.call(this);
 	};
-	NATIVE_RENDERERS.add(renderer);
 }
 
 function syncToolShell(component: any, shell: "default" | "self"): void {

@@ -167,7 +167,9 @@ function tryOpenToolIoShowMore(region: InteractionRegion): boolean {
 	return true;
 }
 
-function tryOpenCardPreview(component: any): boolean {
+/** Also used by native card hit regions when the viewport has no precise row mapping. */
+export function tryOpenCardPreview(component: any): boolean {
+	if (!toolMouseInteractionActive()) return false;
 	const ui = toolMouseUi;
 	if (typeof ui?.custom !== "function") return false;
 	let title: string;
@@ -489,8 +491,10 @@ function handleFullscreenToolClick(tui: any, packet: SgrMousePacket): boolean {
 		const hint = collapsedHintHitbox(line);
 		const onHint = Boolean(
 			hint &&
-				(isThinking || (column >= hint.startCol && column <= hint.endCol)) &&
-				isCollapsedHintRow(component, line, hit.localRow),
+				(isThinking ||
+					(isGroup && target.row === 1 && column <= hint.endCol) ||
+					(column >= hint.startCol && column <= hint.endCol)) &&
+				isCollapsedHintRow(component, line, target.row),
 		);
 		if (!onHint) {
 			// 面板内非提示区（工具卡标题/摘要行、thinking 预览正文）：单击收起整块面板。
@@ -498,6 +502,7 @@ function handleFullscreenToolClick(tui: any, packet: SgrMousePacket): boolean {
 			return false;
 		}
 		if (tryOpenCardPreview(component)) return true;
+		if (typeof toolMouseUi?.custom === "function") return true;
 		// single-expand：展开前收起其他已展开工具卡/group。
 		const others: any[] = [];
 		collectFullscreenToolCards(hit.box.component, others);

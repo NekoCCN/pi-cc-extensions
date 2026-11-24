@@ -19,7 +19,6 @@ import {
 } from "./codemode.ts";
 import { countWriteDiffStats, writeStatsInCollapsedBody } from "./diff/diff-renderer.ts";
 import { renderRichToolResult, type WriteExecutionMetadataStore } from "./diff/index.ts";
-import { collapsedToolBackground } from "./grouping.ts";
 import { mcpToolTitle } from "./mcp-title.ts";
 import {
 	APPLY_PATCH_TOOL_NAME,
@@ -49,7 +48,6 @@ import {
 	scheduleAnimation,
 	settledIcon,
 	setToolVisualState,
-	TOOL_CARD_BG_SLOT,
 	toolIconColor,
 } from "./tool-state.ts";
 import { showMoreHintText } from "./names.ts";
@@ -485,11 +483,7 @@ export function createCcstyleTool(
 					if (cachedLine !== undefined && cachedWidth === width && cachedIcon === icon) {
 						return [cachedLine];
 					}
-					const cardWidth = toolViewportWidth(width);
-					const viewportWidth = Math.max(
-						1,
-						cardWidth - (fold && typeof theme?.bg === "function" ? 1 : 0),
-					);
+					const viewportWidth = toolViewportWidth(width);
 					// 展开态贴左（外层 Box 已 pad 1）；折叠 self-shell 保留 1 格前导空格
 					const lead = expanded ? "" : " ";
 					const callWidth = Math.max(
@@ -508,14 +502,6 @@ export function createCcstyleTool(
 						viewportWidth,
 						"",
 					);
-					if (fold) {
-						cachedLine = collapsedToolBackground(
-							theme,
-							TOOL_CARD_BG_SLOT[context?.isError ? "error" : "success"],
-							cachedLine,
-							cardWidth,
-						);
-					}
 					return [cachedLine];
 				},
 				invalidate() {

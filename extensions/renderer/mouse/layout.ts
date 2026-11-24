@@ -83,8 +83,10 @@ export function fullscreenLeafAt(
 	return best;
 }
 
-/** leaf 自身不带 scrollView；内容宽度由最近的 scroll 祖先决定。 */
+/** Use the width the layout actually gave the leaf (which can share the screen with a sidebar). */
 export function fullscreenContentWidth(box: any, terminalWidth: number): number {
+	const leafWidth = box?.rect?.width;
+	if (typeof leafWidth === "number" && leafWidth > 0) return leafWidth;
 	for (let current = box; current; current = current.parent) {
 		if (typeof current.scrollView?.getContentWidth === "function") {
 			return Math.max(1, current.scrollView.getContentWidth(terminalWidth));
