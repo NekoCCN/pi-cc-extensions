@@ -18,7 +18,11 @@ import { installCompactThinking } from "./feature/compact-thinking.ts";
 
 // renderer
 import claudeCodeStyle, { getCompactThinkingConfig } from "./renderer/index.ts";
-import { MARKDOWN_ENHANCE_MESSAGE_TYPES, transformMarkdown } from "./renderer/markdown-enhance.ts";
+import {
+	MARKDOWN_ENHANCE_MESSAGE_TYPES,
+	setMarkdownHeadingStyle,
+	transformMarkdown,
+} from "./renderer/markdown-enhance.ts";
 import tableCopy from "./renderer/table-copy.ts";
 
 /** One registration per extension: table provenance must not replace enhancement. */
@@ -29,6 +33,11 @@ export function configureMarkdownRendering(
 		enableTableCopy,
 	}: { enableMarkdownEnhance: boolean; enableTableCopy: boolean },
 ): void {
+	setMarkdownHeadingStyle(enableMarkdownEnhance);
+	if (enableMarkdownEnhance) {
+		pi.on("session_start", () => setMarkdownHeadingStyle(true));
+		pi.on("session_shutdown", () => setMarkdownHeadingStyle(false));
+	}
 	const copy = enableTableCopy ? tableCopy(pi) : undefined;
 	if (!enableMarkdownEnhance && !copy) return;
 	pi.registerMarkdownTransformer(

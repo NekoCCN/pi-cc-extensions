@@ -46,6 +46,22 @@ const TABLE = "| A | B |\n| --- | --- |\n| one | two |\n";
 const text = (component: { render(width: number): string[] }) =>
 	component.render(80).map(stripTerminalSequences).join("\n");
 
+test("heading levels have distinct visual markers without styling heading-like code", async () => {
+	const host = runtime({ enableMarkdownEnhance: true, enableTableCopy: false });
+	const md = host.create(
+		"# Import / 导入\n\n## Findings\n\n### Evidence\n\n```text\n# literal\n```",
+	);
+	try {
+		const rendered = text(md);
+		assert.match(rendered, /▌ Import \/ 导入/);
+		assert.match(rendered, /─ Findings/);
+		assert.match(rendered, /· Evidence/);
+		assert.match(rendered, /# literal/);
+	} finally {
+		await host.stop();
+	}
+});
+
 function runtime(
 	features = { enableMarkdownEnhance: false, enableTableCopy: true },
 	mode = "fullscreen",
@@ -135,6 +151,47 @@ function runtime(
 		},
 	};
 }
+
+test("separates headings from adjacent lists without changing the Markdown source", () => {
+	const source = [
+		"# Overview",
+		"- First item",
+		"## [Follow-up](https://example.com) with `code`",
+		"1. Next item",
+		"## Final section",
+		"",
+		"```md",
+		"- Literal item",
+		"## Literal heading",
+		"```",
+		"",
+		TABLE,
+	].join("\n");
+	const enabled = runtime({ enableMarkdownEnhance: true, enableTableCopy: false });
+	const rendered = text(enabled.create(source));
+
+	assert.equal(enabled.apply(source), source);
+	assert.match(rendered, /- First item *\n *\n─ Follow-up.*with code *\n *\n1\. Next item/);
+	assert.match(rendered, /1\. Next item *\n *\n─ Final section/);
+	assert.match(rendered, /- Literal item *\n +## Literal heading/);
+	assert.match(rendered, /│ one │ two │/);
+
+	const disabled = runtime({ enableMarkdownEnhance: false, enableTableCopy: false });
+	assert.match(text(disabled.create(source)), /- First item *\nFollow-up/);
+});
+
+test("restores native heading spacing when the extension unloads", async () => {
+	const host = runtime({ enableMarkdownEnhance: true, enableTableCopy: false });
+	const source = "- Item\n## Heading";
+	assert.match(text(host.create(source)), /- Item *\n *\n─ Heading/);
+
+	await host.stop();
+	assert.match(text(host.create(source)), /- Item *\nHeading/);
+
+	await host.start();
+	assert.match(text(host.create(source)), /- Item *\n *\n─ Heading/);
+	await host.stop();
+});
 
 for (const enableMarkdownEnhance of [false, true]) {
 	for (const enableTableCopy of [false, true]) {

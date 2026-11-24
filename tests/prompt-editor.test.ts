@@ -2,9 +2,74 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { config } from "../extensions/config/config.ts";
-import { applyPromptEditor, clearPromptEditor } from "../extensions/feature/shell/prompt-editor.ts";
+import {
+	ProcessTerminal,
+	TuiAltScreen,
+	stripTerminalSequences,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
+import {
+	PromptEditor,
+	applyPromptEditor,
+	clearPromptEditor,
+	inputTextIndent,
+} from "../extensions/feature/shell/prompt-editor.ts";
 
 type EditorFactory = (tui: unknown, theme: unknown, keybindings: unknown) => unknown;
+
+const { KeybindingsManager } = await import(
+	new URL("./core/keybindings.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href
+);
+
+class RenderTestTui extends TuiAltScreen {
+	override requestRender(): void {}
+}
+
+function renderTestEditor(): PromptEditor {
+	const identity = (text: string) => text;
+	return new PromptEditor(
+		new RenderTestTui(new ProcessTerminal(), false),
+		{
+			borderColor: identity,
+			selectList: {
+				selectedPrefix: identity,
+				selectedText: identity,
+				description: identity,
+				scrollInfo: identity,
+				noMatch: identity,
+			},
+		},
+		new KeybindingsManager(),
+	);
+}
+
+test("rounds the frame around multiline input with one prompt and honors editor padding", (t) => {
+	useEditorPrefix(t, true);
+	const editor = renderTestEditor();
+	editor.setPaddingX(2);
+	editor.setText("第一行\nsecond line");
+	editor.focused = true;
+
+	for (const width of [28, 80]) {
+		const rows = editor.render(width).map(stripTerminalSequences);
+		assert.deepEqual(rows.map(visibleWidth), [width, width, width, width]);
+		assert.match(rows[0], /^╭─+╮$/);
+		assert.match(rows[1], /^│❯ {3}第一行 +│$/);
+		assert.match(rows[2], /^│ {4}second line +│$/);
+		assert.match(rows[3], /^╰─+╯$/);
+		assert.equal(inputTextIndent(), visibleWidth("│❯   "));
+	}
+	assert.equal(editor.getPaddingX(), 2);
+});
+
+test("keeps the input visible at widths too narrow for a frame", () => {
+	const editor = renderTestEditor();
+	editor.setText("中");
+
+	const rows = editor.render(5).map(stripTerminalSequences);
+	assert.ok(rows.some((line) => line.includes("中")));
+	assert.ok(rows.every((line) => visibleWidth(line) === 5 && !/[╭╮╰╯│]/.test(line)));
+});
 
 /** Minimal UI stub: one editor slot plus a notification sink. */
 function fakeEditorSlot() {

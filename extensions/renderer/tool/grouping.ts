@@ -1,4 +1,4 @@
-import { AssistantMessageComponent, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
 	Spacer,
@@ -56,6 +56,13 @@ import {
 	TOOL_GROUPING_PARENT_KEY as PARENT_KEY,
 	TOOL_GROUPING_PATCH_KEY as PATCH_KEY,
 } from "../../utils/patch-keys.ts";
+import {
+	getToolCallId,
+	getToolDefinition,
+	getToolName,
+	isNativeExplorationGroup,
+	isUnifiedToolExecutionComponent,
+} from "./native-identity.ts";
 
 const NON_GROUPABLE = new Set(["edit", "write", "apply_patch"]);
 
@@ -74,7 +81,7 @@ type Patch = {
 };
 
 function toolName(tool: any): string {
-	return String(tool?.toolName ?? tool?.toolDefinition?.name ?? "tool");
+	return getToolName(tool);
 }
 
 /**
@@ -85,17 +92,19 @@ function toolTitle(tool: any): string {
 	return (
 		mcpToolTitle({
 			toolName: name,
-			definition: tool?.toolDefinition ?? tool?.builtInToolDefinition,
+			definition: getToolDefinition(tool) ?? tool?.builtInToolDefinition,
 		}) ?? humanizeToolLabel(name)
 	);
 }
 
 function isGroupableTool(value: unknown): boolean {
-	return value instanceof ToolExecutionComponent && !NON_GROUPABLE.has(toolName(value));
+	if (isNativeExplorationGroup(value)) return false;
+	return isUnifiedToolExecutionComponent(value) && !NON_GROUPABLE.has(toolName(value));
 }
 
 /** 可分组项：工具，或子代理完成通知（只是展示项，不是工具执行）。 */
 function isGroupable(value: unknown): boolean {
+	if (isNativeExplorationGroup(value)) return false;
 	return isGroupableTool(value) || isSubagentNotificationComponent(value);
 }
 
@@ -166,7 +175,8 @@ function statusIcon(value: ToolStatus): string {
 /** 等待窗口或运行中的行：spinner 逐帧变化，分组卡要跟着跳帧。 */
 function isAnimatingTool(tool: any): boolean {
 	if (status(tool) !== "pending") return false;
-	return Boolean(tool?.executionStarted) || isLiveToolCall(tool?.toolCallId);
+	const started = tool?.executionStarted ?? tool?.presentationSnapshot?.state?.executionStarted;
+	return Boolean(started) || isLiveToolCall(getToolCallId(tool));
 }
 
 function scheduleGroupAnimation(patch: Patch): void {
@@ -805,6 +815,8 @@ function maybeGroup(patch: Patch, parent: any, component: any): void {
 		!patch.active ||
 		!patch.enabled() ||
 		parent instanceof ToolGroupComponent ||
+		isNativeExplorationGroup(parent) ||
+		isNativeExplorationGroup(component) ||
 		!isGroupable(component)
 	)
 		return;
@@ -838,8 +850,13 @@ function maybeGroup(patch: Patch, parent: any, component: any): void {
 function regroup(patch: Patch, root: any): void {
 	if (!patch.active || !patch.enabled() || !root) return;
 	walkComponentTree(root, (value: any) => {
-		// 分组卡与可分组工具是分组边界：不继续下钻（与原有遍历过滤一致）。
-		if (value instanceof ToolGroupComponent || isGroupable(value)) return false;
+		// 分组卡、可分组工具与原生分组都是分组边界：不继续下钻（与原有遍历过滤一致）。
+		if (
+			value instanceof ToolGroupComponent ||
+			isNativeExplorationGroup(value) ||
+			isGroupable(value)
+		)
+			return false;
 		const children = value.children;
 		if (Array.isArray(children)) {
 			for (const child of [...children]) {

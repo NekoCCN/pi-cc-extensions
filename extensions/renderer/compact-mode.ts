@@ -60,7 +60,29 @@ import { isToolCallHovered } from "./mouse/hover.ts";
 import { getToolMouseTui } from "./mouse/scroll.ts";
 import { expandedBodyComponent, insetComponent } from "./tool/result.ts";
 import { isLiveToolCall, scheduleAnimation } from "./tool/tool-state.ts";
+import {
+	getToolCallId,
+	getToolName,
+	isNativeExplorationGroup,
+	isNativeToolExecutionComponent,
+} from "./tool/native-identity.ts";
 import { isTranscriptComponent } from "./transcript-scope.ts";
+
+/**
+ * Snapshot-backed compact identity (OmO Native 5.1.81 nests the tool name/id in
+ * `identity` / `presentationSnapshot.identity`; Pi keeps them flat). Every
+ * component↔message join below must use these: the message side carries
+ * provider ids (`call_0` …), and flat-only reads collapse all native cards to
+ * a single empty id, hiding tools the round never claims.
+ */
+const componentToolId = (value: any): string => getToolCallId(value) ?? "";
+const componentToolName = (value: any): string => getToolName(value);
+/** OUTER_TOOLS gating keeps the message-level name as the last fallback. */
+const outerToolName = (tool: any, fallbackName?: string): string => {
+	const name = getToolName(tool);
+	if (name !== "tool") return name;
+	return typeof fallbackName === "string" ? fallbackName : name;
+};
 
 const COMPACT_ROUND_TAIL_KEY = Symbol.for("ccstyle.compactRoundTail");
 
@@ -746,7 +768,7 @@ function compactEditWriteLine(
 	options: { hint?: boolean; flushLeft?: boolean; showStats?: boolean } = {},
 ): string[] {
 	const theme = themeOf();
-	const name = String(component.toolName ?? "tool");
+	const name = componentToolName(component);
 	const args = component.args ?? {};
 	const path =
 		typeof args.path === "string" && args.path
@@ -768,8 +790,8 @@ function compactEditWriteLine(
 				: name === "write"
 					? countWriteDiffStats(
 							typeof args.content === "string" ? args.content : undefined,
-							writeMetadata?.get(component.toolCallId)?.previousContent,
-							writeMetadata?.get(component.toolCallId)?.fileExistedBeforeWrite,
+							writeMetadata?.get(getToolCallId(component))?.previousContent,
+							writeMetadata?.get(getToolCallId(component))?.fileExistedBeforeWrite,
 						)
 					: undefined;
 		if (stats) {
@@ -798,7 +820,7 @@ function compactEditWriteLine(
 		pathWidth > 0 && path ? ` ${formatDisplayPath(path, component.cwd, pathWidth)}` : "";
 	// 圆点保持 dim；hover 只高亮可点击文字，与 compact 摘要行一致
 	const hintPart = clickable
-		? `${theme.fg("dim", " · ")}${theme.fg(isToolCallHovered(component.toolCallId) ? "text" : "dim", clickText)}`
+		? `${theme.fg("dim", " · ")}${theme.fg(isToolCallHovered(getToolCallId(component)) ? "text" : "dim", clickText)}`
 		: "";
 	const line = `${iconPart}${namePart}${theme.fg("muted", pathPart)}${statsStyled}${hintPart}`;
 	return ["", truncateToWidth(line, width, "")];
@@ -850,7 +872,7 @@ function compactEditWriteLines(
 	const expanded = component.expanded === true;
 	const isPartial = component.isPartial === true;
 	const pending = !component.result || isPartial;
-	const hover = isToolCallHovered(component.toolCallId);
+	const hover = isToolCallHovered(getToolCallId(component));
 	const ioHover = compactEditIoHover(component);
 	const theme = themeOf();
 	const diffConfigKey = displayConfigCacheKey(getToolDisplayConfig());
@@ -912,13 +934,13 @@ function paintCompactEditWrite(
 		candidate = entry[slot];
 		if (!isRichDiffComponent(candidate)) {
 			candidate = renderRichToolResult(
-				String(component.toolName ?? ""),
+				componentToolName(component),
 				result,
 				{
 					expanded,
 					isPartial: component.isPartial === true,
 					isError,
-					isHovered: () => isToolCallHovered(component.toolCallId),
+					isHovered: () => isToolCallHovered(getToolCallId(component)),
 				},
 				theme,
 				component,
@@ -1313,13 +1335,28 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 		return Math.max(1, end - round.startedAt);
 	};
 
-	const summarize = (messages: Iterable<any>, runningActive?: boolean, round?: CompactRound) =>
-		buildMessagesSummary(
-			messages,
+	const summarize = (messages: Iterable<any>, runningActive?: boolean, round?: CompactRound) => {
+		const adjacent = round ? roundAdjacentToolIds(round) : new Set<string>();
+		const extraCalls = [];
+		if (adjacent.size) {
+			for (const tool of trackedToolComponents) {
+				const id = getToolCallId(tool);
+				if (!id || !adjacent.delete(id)) continue;
+				extraCalls.push({
+					type: "toolCall",
+					name: getToolName(tool),
+					arguments: tool.args ?? tool.presentationSnapshot?.state?.args,
+				});
+				if (!adjacent.size) break;
+			}
+		}
+		return buildMessagesSummary(
+			extraCalls.length ? [...messages, { content: extraCalls }] : messages,
 			deps.query,
 			runningActive,
 			round ? roundWallMs(round) : undefined,
 		);
+	};
 
 	const stopRoundTick = (): void => {
 		if (!roundTickTimer) return;
@@ -1497,10 +1534,10 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 	};
 
 	const markRoundToolUserExpanded = (tool: any): void => {
-		const id = String(tool?.toolCallId ?? "");
+		const id = componentToolId(tool);
 		if (!id || !expandedRoundToolIds.has(id)) return;
 		for (const other of trackedToolComponents) {
-			const otherId = String(other?.toolCallId ?? "");
+			const otherId = componentToolId(other);
 			if (other === tool || !expandedRoundToolIds.has(otherId) || other.expanded !== true) continue;
 			explicitRoundToolIds.delete(otherId);
 			collapseTool(other);
@@ -1525,6 +1562,45 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 	};
 
 	/**
+	 * 位置相邻的回合工具：OmO 原生 assistant 消息是 head 设计（首个 toolCall
+	 * 之后的内容由工具卡自己呈现，见 assistantStreamingHeadMessage），消息条目
+	 * 只能认领首个调用，其余调用只有卡片相邻而没有任何条目。按容器位置把这些
+	 * 卡并入回合：anchor 之后、用户消息/其他回合 anchor/尾行之前，且未被任何
+	 * 消息条目认领的顶层工具卡。原生 ExplorationGroup 保持原样（不下钻，
+	 * 它的成员已通过分组展示，避免重复认领）。
+	 */
+	const roundAdjacentToolIds = (round: CompactRound): Set<string> => {
+		const ids = new Set<string>();
+		const messageIds = roundToolCallIds(round);
+		const container = tailContainerOf(round.anchor);
+		const children =
+			container && Array.isArray(container.children) ? container.children : undefined;
+		if (!children || children.length === 0) return ids;
+		const anchorIndex = children.indexOf(round.anchor);
+		if (anchorIndex < 0) return ids;
+		const otherAnchors = new Set<object>();
+		for (const other of allRounds()) {
+			if (other !== round && other.anchor) otherAnchors.add(other.anchor);
+		}
+		for (let index = anchorIndex + 1; index < children.length; index++) {
+			const child = children[index];
+			if (!child || typeof child !== "object") continue;
+			if (child instanceof UserMessageComponent || otherAnchors.has(child)) break;
+			if (isCompactRoundTail(child)) break;
+			if (isNativeExplorationGroup(child)) continue;
+			if (isNativeToolExecutionComponent(child)) {
+				const id = getToolCallId(child);
+				if (id && !messageIds.has(id)) ids.add(id);
+			}
+		}
+		return ids;
+	};
+
+	/** 回合认领的全部工具 id：消息条目 + 位置相邻。 */
+	const roundClaimedToolIds = (round: CompactRound): Set<string> =>
+		new Set([...roundToolCallIds(round), ...roundAdjacentToolIds(round)]);
+
+	/**
 	 * 回合还有活干：成员消息仍在流式，或本回合的工具还没拿到最终结果。
 	 * 收尾要么按事实等活干完，要么摘要行就会把仍在跑的工具报成 Ran for。
 	 * pendingLiveTool 是「toolCall 已写进消息、组件还没挂上」的空窗：流停了也要等它合上。
@@ -1535,11 +1611,11 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 		for (const component of round.messages.keys()) {
 			if (component?.isStreaming === true) return true;
 		}
-		const ids = roundToolCallIds(round);
+		const ids = roundClaimedToolIds(round);
 		if (ids.size === 0) return false;
 		for (const tool of trackedToolComponents) {
-			const id = tool?.toolCallId;
-			if (typeof id !== "string" || !ids.has(id)) continue;
+			const id = getToolCallId(tool);
+			if (typeof id !== "string" || !id || !ids.has(id)) continue;
 			if (isRunningTool(tool)) return true;
 			// 组件已挂上、还没 markExecutionStarted：声明期 id 仍在等派发。
 			if (!sessionIdle() && isLiveToolCall(id) && (!tool.result || tool.isPartial === true)) {
@@ -1606,9 +1682,11 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 
 	/** 回合成员判定：本回合的 assistant 组件，或归属本回合的工具（含分组容器）。 */
 	const roundMemberMatcher = (round: CompactRound): ((value: any) => boolean) => {
-		const ids = roundToolCallIds(round);
-		const matchesTool = (value: any): boolean =>
-			typeof value?.toolCallId === "string" && ids.has(value.toolCallId);
+		const ids = roundClaimedToolIds(round);
+		const matchesTool = (value: any): boolean => {
+			const id = getToolCallId(value);
+			return typeof id === "string" && id !== "" && ids.has(id);
+		};
 		return (value: any): boolean =>
 			round.messages.has(value) ||
 			matchesTool(value) ||
@@ -1725,10 +1803,15 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 	};
 
 	/** 它们排在摘要行之下；定位时不把它们当摘要行之前的成员。 */
-	const isOuterToolRow = (ids: Set<string>, value: any): boolean =>
-		typeof value?.toolCallId === "string" &&
-		ids.has(value.toolCallId) &&
-		OUTER_TOOLS.has(String(value.toolName ?? ""));
+	const isOuterToolRow = (ids: Set<string>, value: any): boolean => {
+		const id = getToolCallId(value);
+		return (
+			typeof id === "string" &&
+			id !== "" &&
+			ids.has(id) &&
+			OUTER_TOOLS.has(componentToolName(value))
+		);
+	};
 
 	/**
 	 * 尾行归位。目标位：活回合（运行中/收尾静默期）且未展开 → 容器最末，
@@ -1750,7 +1833,7 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 		if (!container || !Array.isArray(container.children)) return;
 		tail.container = container;
 		const children = container.children as any[];
-		const ids = roundToolCallIds(round);
+		const ids = roundClaimedToolIds(round);
 		const live = roundLive(round);
 		const isMember = roundMemberMatcher(round);
 		// 收尾后，本回合的外露行（edit/write/ask）一律排到摘要行之下；
@@ -1827,7 +1910,7 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 	const syncTailForTool = (toolCallId: string): void => {
 		if (!toolCallId) return;
 		for (const round of allRounds()) {
-			if (!roundToolCallIds(round).has(toolCallId)) continue;
+			if (!roundClaimedToolIds(round).has(toolCallId)) continue;
 			// 工具收尾后活干完了：挂起的收尾请求当场兑现，摘要行立刻翻成 Ran for。
 			if (retryDeferredFinalize(round)) return;
 			// 槽位是在消息更新时画的，当时工具组件还不存在：组件到了就补上。
@@ -1979,7 +2062,8 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 
 		const toolsById = new Map<string, any>();
 		for (const tool of trackedToolComponents) {
-			if (typeof tool?.toolCallId === "string") toolsById.set(tool.toolCallId, tool);
+			const resolvedId = getToolCallId(tool);
+			if (typeof resolvedId === "string" && resolvedId) toolsById.set(resolvedId, tool);
 		}
 		let runningTool: any;
 		let lastTool: any;
@@ -1989,7 +2073,7 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 				if (item?.type !== "toolCall" || typeof item.id !== "string") continue;
 				const tool = toolsById.get(item.id);
 				// edit/write 保留自己的 compact 行，不进槽位。
-				if (OUTER_TOOLS.has(String(tool?.toolName ?? item.name ?? ""))) continue;
+				if (OUTER_TOOLS.has(outerToolName(tool, item.name))) continue;
 				round.liveSlotToolIds.add(item.id);
 				liveSlotToolIds.add(item.id);
 				// pi 的 message_update 先 updateContent 再建工具组件：这一帧计数已经算上，
@@ -2001,6 +2085,19 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 				lastTool = tool;
 				if (isRunningTool(tool)) runningTool = tool;
 			}
+		}
+		// Head 消息之外的相邻工具（原生 head 只带首个 toolCall）：按容器顺序补上。
+		for (const id of roundAdjacentToolIds(round)) {
+			const tool = toolsById.get(id);
+			if (!tool) {
+				missingTool = true;
+				continue;
+			}
+			if (OUTER_TOOLS.has(outerToolName(tool))) continue;
+			round.liveSlotToolIds.add(id);
+			liveSlotToolIds.add(id);
+			lastTool = tool;
+			if (isRunningTool(tool)) runningTool = tool;
 		}
 		round.pendingLiveTool = missingTool;
 		// 槽位单块：活动思考最新；否则本回合最近的工具（运行中原位增长，完成也留着）。
@@ -2048,11 +2145,10 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 		// 少了后一步，被点开的工具会带着自身的 expanded 落到 toolInstalledRender 的放行分支，
 		// 面板一收就单独渲染成一张卡。
 		if (round.anchor.expanded !== true) {
-			const ids = roundToolCallIds(round);
+			const ids = roundClaimedToolIds(round);
 			for (const id of ids) explicitRoundToolIds.delete(id);
 			collapseTools(
-				(tool) =>
-					ids.has(String(tool.toolCallId ?? "")) && !OUTER_TOOLS.has(String(tool.toolName ?? "")),
+				(tool) => ids.has(componentToolId(tool)) && !OUTER_TOOLS.has(componentToolName(tool)),
 			);
 		}
 		for (const id of round.liveSlotToolIds) liveSlotToolIds.delete(id);
@@ -2094,7 +2190,8 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 			const mounted = Boolean(tailContainerOf(round.anchor));
 			const toolsById = new Map<string, any>();
 			for (const tool of trackedToolComponents) {
-				if (typeof tool?.toolCallId === "string") toolsById.set(tool.toolCallId, tool);
+				const resolvedId = getToolCallId(tool);
+				if (typeof resolvedId === "string" && resolvedId) toolsById.set(resolvedId, tool);
 			}
 			// 助手文本按原生渲染、不进面板（面板只留 thinking 与工具卡）。
 			// thinking/工具卡按连续段各包一张面板；先出文本再出面板，
@@ -2138,7 +2235,7 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 			const placedToolIds = new Set<string>();
 			const placeTool = (id: string, fallbackName?: string) => {
 				const tool = toolsById.get(id);
-				if (!tool || OUTER_TOOLS.has(String(tool.toolName ?? fallbackName ?? ""))) return;
+				if (!tool || OUTER_TOOLS.has(outerToolName(tool, fallbackName))) return;
 				if (placedToolIds.has(id)) return;
 				placedToolIds.add(id);
 				cardItems.push({ tool });
@@ -2193,7 +2290,7 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 					}
 				}
 			}
-			const ids = roundToolCallIds(round);
+			const ids = roundClaimedToolIds(round);
 			for (const id of ids) {
 				round.suppressedToolIds.add(id);
 				expandedRoundToolIds.add(id);
@@ -2203,9 +2300,9 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 			// 用户单独点开的（explicitRoundToolIds）不压回去。
 			collapseTools(
 				(tool) =>
-					ids.has(String(tool.toolCallId ?? "")) &&
-					!OUTER_TOOLS.has(String(tool.toolName ?? "")) &&
-					!explicitRoundToolIds.has(String(tool.toolCallId ?? "")),
+					ids.has(componentToolId(tool)) &&
+					!OUTER_TOOLS.has(componentToolName(tool)) &&
+					!explicitRoundToolIds.has(componentToolId(tool)),
 			);
 			flushPanel();
 			// anchorChildren 只剩面板件（spacer+panelBoundSpacer 都是 childAtRow 组件）：
@@ -2491,24 +2588,28 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 		if (!patch.active || config.mode !== "compact" || isTranscriptComponent(this)) {
 			return patch.toolOriginalRender.call(this, width);
 		}
-		const name = String(this.toolName ?? "");
+		const name = componentToolName(this);
 		if (OUTER_TOOLS.has(name)) {
 			// edit/write 走 compact 自己的 rich diff；ask_user_question 走 default 模式的专用渲染。
 			// 两者都留在外层，不进摘要、不进展开面板。
 			if (EDIT_WRITE_TOOLS.has(name)) {
 				const pending = !this.result || this.isPartial === true;
 				// 等待窗口（声明流式中或等待派发）也要转，否则这一行冻在第一帧。
-				if (pending && (this.executionStarted || isLiveToolCall(this.toolCallId)))
+				if (pending && (this.executionStarted || isLiveToolCall(getToolCallId(this))))
 					scheduleAnimation(this);
 				return compactEditWriteLines(this, width, deps.writeMetadata);
 			}
 			return patch.toolOriginalRender.call(this, width);
 		}
 		// Agent/Task 等同普通工具：折叠不外置（live 面板走独立 widget）。
-		if (expandedRoundToolIds.has(String(this.toolCallId ?? ""))) return [];
+		if (expandedRoundToolIds.has(componentToolId(this))) {
+			return [];
+		}
 		// live 围观态：本回合工具交由槽位卡内联渲染，外层不再单独成行，
 		// 卡片因此不会随工具完成反复挂载/卸载。
-		if (liveSlotToolIds.has(String(this.toolCallId ?? ""))) return [];
+		if (liveSlotToolIds.has(componentToolId(this))) {
+			return [];
+		}
 		// 普通工具折叠时不显示独立行（摘要行已统计），独立展开走原 renderer。
 		if (this.expanded === true) {
 			return patch.toolOriginalRender.call(this, width);
@@ -2519,7 +2620,7 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 	patch.toolInstalledUpdateDisplay = function (this: any) {
 		// 浏览层副本：不受回合展开规则约束，也不进组件跟踪。
 		if (isTranscriptComponent(this)) return patch.toolOriginalUpdateDisplay.call(this);
-		const id = String(this.toolCallId ?? "");
+		const id = componentToolId(this);
 		if (
 			patch.active &&
 			config.mode === "compact" &&

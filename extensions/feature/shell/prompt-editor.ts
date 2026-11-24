@@ -1,53 +1,97 @@
 /**
- * 输入框 `❯` 提示符（issue #68）。
+ * 输入框圆角边框与 `❯` 提示符（issue #68）。
  *
  * `PromptEditor` 继承 `CustomEditor`：pi 的 setCustomEditorComponent 会自动接线
  * onSubmit/onChange/actionHandlers/autocomplete/工作状态指示器，本扩展只管渲染。
  *
- * `❯ ` 恒占左侧 2 列：渲染前把 paddingX 抬到「用户值 + 2」（直接改字段绕过
- * setter，避免每帧 requestRender 自激），渲染后恢复。首内容行前两列换成
- * `❯ `，其后仍保留用户 editorPaddingX 的空格。
- * `❯` 颜色直接用 `borderColor`，随 thinking 等级 / bash mode 自动联动。
- *
- * `userPaddingX` 记录渲染时读到的用户 editorPaddingX（pi 通过 setPaddingX
- * 同步进本编辑器），footer 用 `inputTextIndent()` 对齐输入文本起始列：
- * 前缀开 = userPaddingX + 2，关 = userPaddingX。
+ * 左侧内边距留出「边框 1 列 + ❯ 2 列 + 用户 editorPaddingX」。
+ * 边框和提示符都跟随原生 thinking / bash mode 颜色。
  */
 import { CustomEditor, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Editor } from "@earendil-works/pi-tui";
 import { config } from "../../config/config.ts";
 import { setInjectedKeybindings } from "../../utils/keybindings.ts";
 
 /** `❯ ` 固定 2 列：glyph + 尾随空格。 */
 const PROMPT_GLYPH = "❯";
 const PROMPT_COLS = 2;
+const FRAME_COLS = 1;
+const CHROME_PADDING = FRAME_COLS + PROMPT_COLS;
+const MIN_FRAME_WIDTH = CHROME_PADDING * 2 + 2;
 
-/** 最近一次 render 读到的用户 editorPaddingX；未启用过提示符时为 0。 */
+/** 最近一次 render 读到的用户 editorPaddingX；未启用过时为 0。 */
 let userPaddingX = 0;
 
 /** 输入文本起始列：footer 按它对齐。 */
 export function inputTextIndent(): number {
-	return config.enableEditorPrefix ? userPaddingX + PROMPT_COLS : userPaddingX;
+	return config.enableEditorPrefix ? userPaddingX + CHROME_PADDING : userPaddingX;
 }
 
 export class PromptEditor extends CustomEditor {
-	render(width: number): string[] {
-		// ❯ + 用户 padding：文本从 userPaddingX+2 列开始。
-		const self = this as unknown as { paddingX: number };
-		const saved = self.paddingX;
-		userPaddingX = saved;
-		self.paddingX = saved + PROMPT_COLS;
-		try {
-			const lines = super.render(width);
-			// 布局：lines[0] 顶边框，lines[1..n-2] 内容，lines[n-1] 底边框（autocomplete 在底边框后追加，
-			// 首内容行恒为 index 1）。开头是 paddingX 个纯空格，前两列换成 ❯+空格，剩余 padding 保留；
-			// 续行不动——Claude Code 行为。
-			if (lines.length > 2 && lines[1].startsWith("  ")) {
-				lines[1] = this.borderColor(PROMPT_GLYPH) + " " + lines[1].slice(2);
-			}
-			return lines;
-		} finally {
-			self.paddingX = saved;
+	#configuredPadding = 0;
+	#showPrompt = true;
+
+	constructor(...args: ConstructorParameters<typeof CustomEditor>) {
+		super(...args);
+		this.setPaddingX(super.getPaddingX());
+	}
+
+	override getPaddingX(): number {
+		return this.#configuredPadding;
+	}
+
+	override setPaddingX(padding: number): void {
+		this.#configuredPadding = Number.isFinite(padding) ? Math.max(0, Math.floor(padding)) : 0;
+		Editor.prototype.setPaddingX.call(this, this.#configuredPadding + CHROME_PADDING);
+	}
+
+	protected override renderTopBorder(width: number, hiddenLineCount: number): string {
+		this.#showPrompt = hiddenLineCount === 0;
+		if (width < MIN_FRAME_WIDTH) return super.renderTopBorder(width, hiddenLineCount);
+		return (
+			this.borderColor("╭") +
+			super.renderTopBorder(width - 2 * FRAME_COLS, hiddenLineCount) +
+			this.borderColor("╮")
+		);
+	}
+
+	protected override renderBottomBorder(width: number, hiddenLineCount: number): string {
+		if (width < MIN_FRAME_WIDTH) return super.renderBottomBorder(width, hiddenLineCount);
+		return (
+			this.borderColor("╰") +
+			super.renderBottomBorder(width - 2 * FRAME_COLS, hiddenLineCount) +
+			this.borderColor("╯")
+		);
+	}
+
+	override render(width: number): string[] {
+		userPaddingX = this.getPaddingX();
+		const framed = width >= MIN_FRAME_WIDTH;
+		const inset = framed ? FRAME_COLS : 0;
+		// Keep at least two content columns for wide graphemes when padding is clamped.
+		const padding = Math.min(
+			userPaddingX + inset + PROMPT_COLS,
+			Math.max(0, Math.floor((width - 2) / 2)),
+		);
+		Editor.prototype.setPaddingX.call(this, padding);
+		// OmO's CustomEditor already inserts ❯; using the base layout lets us place it
+		// inside the frame on both hosts while retaining the virtual border hooks.
+		const lines = Editor.prototype.render.call(this, width);
+		if (this.#showPrompt && lines[1]?.startsWith(" ".repeat(inset + PROMPT_COLS))) {
+			lines[1] =
+				" ".repeat(inset) +
+				this.borderColor(PROMPT_GLYPH) +
+				" " +
+				lines[1].slice(inset + PROMPT_COLS);
 		}
+		if (framed) {
+			const rail = this.borderColor("│");
+			// The first unpadded row is the bottom border; autocomplete follows it.
+			for (let i = 1; lines[i]?.startsWith(" "); i++) {
+				lines[i] = rail + lines[i].slice(FRAME_COLS, -FRAME_COLS) + rail;
+			}
+		}
+		return lines;
 	}
 }
 

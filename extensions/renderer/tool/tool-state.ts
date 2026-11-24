@@ -103,8 +103,12 @@ export const TOOL_CARD_BG_SLOT: Record<ToolVisualState, ThemeBg> = {
 
 /** 单张工具卡的状态。有失败取失败，没有结果或仍在输出取进行中，其余取成功。 */
 export function toolCardStatus(tool: any): ToolVisualState {
-	if (tool?.result?.isError === true || tool?.isError === true) return "error";
-	if (tool?.isPartial === true || (tool?.executionStarted && !tool?.result) || !tool?.result) {
+	const snapshotState = tool?.presentationSnapshot?.state;
+	const result = tool?.result ?? snapshotState?.result;
+	const isPartial = tool?.isPartial ?? snapshotState?.isPartial ?? false;
+	const executionStarted = tool?.executionStarted ?? snapshotState?.executionStarted ?? false;
+	if (result?.isError === true || tool?.isError === true) return "error";
+	if (isPartial === true || (executionStarted && !result) || !result) {
 		return "pending";
 	}
 	return "success";
@@ -131,7 +135,8 @@ export function aggregateToolCardStatus(tools: readonly any[]): ToolVisualState 
  */
 export function toolCardBgSlot(tool: any): ThemeBg {
 	const status = toolCardStatus(tool);
-	const name = String(tool?.toolName ?? "");
+	const nestedName = tool?.presentationSnapshot?.identity?.toolName ?? tool?.identity?.toolName;
+	const name = String(tool?.toolName ?? nestedName ?? "");
 	if ((name === "edit" || name === "write") && status !== "error") {
 		return TOOL_CARD_BG_SLOT.pending;
 	}

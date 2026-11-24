@@ -14,6 +14,7 @@ import {
 } from "../compact-mode.ts";
 import { isLazyProxyTui } from "../../utils/fullscreen-detect.ts";
 import { setToolTuiFullscreen, isCollapseHintLine } from "../tool/names.ts";
+import { getToolCallId, isNativeExplorationGroup } from "../tool/native-identity.ts";
 import {
 	type ExpandedToolIoView,
 	getActiveIoViewFrame,
@@ -164,7 +165,8 @@ function updateToolSummaryHover(tui: any, packet: SgrMousePacket): void {
 	const nextScrollButtonHovered = region?.kind === "scroll-bottom";
 	const scrollButtonChanged = setScrollButtonHovered(nextScrollButtonHovered);
 	const component = region?.component;
-	const nextToolCallId = region?.kind === "collapsed-hint" ? (component?.toolCallId ?? null) : null;
+	const nextToolCallId =
+		region?.kind === "collapsed-hint" ? (getToolCallId(component) ?? null) : null;
 	// group 只在提示文字上高亮（展开卡整行都是 expanded-card，不能算 hint）。
 	const nextGroup =
 		(region?.kind === "collapsed-hint" || region?.kind === "collapse-hint") &&
@@ -407,6 +409,7 @@ function handleFullscreenToolClick(tui: any, packet: SgrMousePacket): boolean {
 	const target = componentAtLocalRow(hit.box.component, hit.localRow, contentWidth);
 	if (!target) return false;
 	const component = target.component;
+	if (isNativeExplorationGroup(component)) return false;
 	// compact 展开面板内命中时 owner 是面板：收起对象与记账对象都归面板，
 	// 面板内工具行命中时 release 统一由扩展结算。
 	const card = target.group ?? target.owner ?? component;

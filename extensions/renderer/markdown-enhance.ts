@@ -3,7 +3,65 @@ import type {
 	MarkdownMessageType,
 	MarkdownTransformContext,
 } from "@earendil-works/pi-coding-agent";
+import * as tui from "@earendil-works/pi-tui";
 import { diagramKind, render as renderMermaid, sourceBox } from "grok-mermaid";
+
+const HEADING_STYLE = Symbol.for("pi.ccstyle.markdown-heading-style");
+
+type RenderToken = (
+	this: tui.Markdown,
+	token: { readonly type: string; readonly depth?: number },
+	width: number,
+	nextTokenType?: string,
+	styleContext?: unknown,
+) => string[];
+
+/** Style parsed headings and add the gap native Markdown omits after lists. */
+export function setMarkdownHeadingStyle(enabled: boolean): void {
+	const prototype = tui.Markdown.prototype;
+	const restore: unknown = Reflect.get(prototype, HEADING_STYLE);
+	if (typeof restore === "function") {
+		if (!enabled) restore();
+		return;
+	}
+	if (!enabled) return;
+	const descriptor = Object.getOwnPropertyDescriptor(prototype, "renderToken");
+	if (typeof descriptor?.value !== "function") return;
+	const original: RenderToken = descriptor.value;
+	const clearCache: unknown = Reflect.get(tui, "clearRenderCache");
+	const renderToken: RenderToken = function (token, width, nextTokenType, styleContext) {
+		const lines = original.call(this, token, width, nextTokenType, styleContext);
+		if (token.type === "heading" && token.depth && width >= 8 && lines[0]) {
+			const level = token.depth;
+			if (level < 3) {
+				lines[0] = (level === 1 ? "▌ " : "─ ") + lines[0];
+			} else if (
+				level <= 6 &&
+				tui.stripTerminalSequences(lines[0]).startsWith(`${"#".repeat(level)} `)
+			) {
+				lines[0] = lines[0].replace(`${"#".repeat(level)} `, "· ");
+			}
+		}
+		if (token.type === "list" && nextTokenType === "heading" && lines.length && lines.at(-1)) {
+			// OmO attaches source ranges to this array. Keep it and only append a visual row.
+			lines.push("");
+		}
+		return lines;
+	};
+	Object.defineProperty(prototype, "renderToken", { ...descriptor, value: renderToken });
+	Object.defineProperty(prototype, HEADING_STYLE, {
+		configurable: true,
+		value: () => {
+			if (Object.getOwnPropertyDescriptor(prototype, "renderToken")?.value !== renderToken) {
+				return;
+			}
+			Object.defineProperty(prototype, "renderToken", descriptor);
+			Reflect.deleteProperty(prototype, HEADING_STYLE);
+			if (typeof clearCache === "function") clearCache();
+		},
+	});
+	if (typeof clearCache === "function") clearCache();
+}
 
 // ============================================================================
 // Mermaid 方言渲染

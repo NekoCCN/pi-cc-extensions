@@ -5,6 +5,7 @@ import { ToolGroupComponent } from "../tool/grouping.ts";
 import { isMessageDisplayComponent } from "../tool/message-display.ts";
 import { isSubagentNotificationView } from "../tool/subagent-notification.ts";
 import { isToolExecutionComponent, stripTerminalSequencesPreservingLayout } from "./packets.ts";
+import { isNativeExplorationGroup } from "../tool/native-identity.ts";
 import { getScrollButtonWidget } from "./scroll.ts";
 
 export type ComponentRowHit = {
@@ -124,6 +125,7 @@ export function componentAtLocalRow(
 	localRow: number,
 	width: number,
 ): ComponentRowHit | null {
+	if (isNativeExplorationGroup(component)) return { component, row: localRow };
 	if (component instanceof ToolGroupComponent) {
 		// 展开的 group：头两行（空行 + 头行）归 group，其余行映射到内部工具。
 		const child = component.childAtRow(localRow, width);
@@ -186,6 +188,10 @@ export function collectFullscreenToolCards(
 ): void {
 	if (!component || typeof component !== "object" || seen.has(component)) return;
 	seen.add(component);
+	if (isNativeExplorationGroup(component)) {
+		out.push(component);
+		return;
+	}
 	if (
 		isToolExecutionComponent(component) ||
 		component instanceof ToolGroupComponent ||

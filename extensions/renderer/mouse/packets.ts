@@ -28,14 +28,19 @@ const TOOL_FRAME_MARKER_RE = /\x1b_cc:t(\d+):(\d+)\x07/g;
 const TOOL_VIEW_MARKER_RE = /\x1b_cc:v(\d+):([io])\x07/g;
 export const toolFrameMarker = (id: number, row: number) => `\x1b_cc:t${id}:${row}\x07`;
 
-/** 工具执行组件识别（toolCallId + setExpanded + render）。 */
+/** 工具执行组件识别（Pi flat toolCallId 或 OmO native identity + setExpanded + render）。 */
 export function isToolExecutionComponent(value: any): boolean {
+	if (!value || typeof value !== "object") return false;
+	if (typeof value.setExpanded !== "function" || typeof value.render !== "function") {
+		return false;
+	}
+	if (typeof value.toolCallId === "string") return true;
+	const identity = value.identity ?? value.presentationSnapshot?.identity;
 	return Boolean(
-		value &&
-			typeof value === "object" &&
-			typeof value.toolCallId === "string" &&
-			typeof value.setExpanded === "function" &&
-			typeof value.render === "function",
+		identity &&
+			typeof identity === "object" &&
+			typeof identity.toolCallId === "string" &&
+			typeof identity.toolName === "string",
 	);
 }
 
