@@ -101,6 +101,24 @@ function normalizePreviewText(text: string): string {
 const COPY_LABEL = "[copy]";
 const ESC_LABEL = "[esc]";
 
+/**
+ * 工具预览正文着色：Input/Output 章节头 accent 加粗，分组分隔线变暗，
+ * Input 正文变 muted，形成 章节头 > 输入 > 输出 的层次；只对 literal 生效。
+ */
+export function styledPreviewLines(lines: string[], theme: any): string[] {
+	if (typeof theme?.fg !== "function") return lines;
+	let section: "input" | "output" | undefined;
+	return lines.map((line) => {
+		if (line === "Input" || line === "Output") {
+			section = line.toLowerCase() as "input" | "output";
+			return theme.bold(theme.fg("accent", line));
+		}
+		if (line.startsWith("───")) return theme.fg("dim", line);
+		if (section === "input" && line.trim() !== "") return theme.fg("muted", line);
+		return line;
+	});
+}
+
 /** 测试可替换；生产使用 pi 的剪贴板实现。 */
 let copyTextImpl: (text: string) => Promise<void> = (text) => copyToClipboard(text);
 
@@ -359,7 +377,10 @@ export async function showTextPreview(
 							startCol: width - 6 - 1 - visibleWidth(COPY_LABEL),
 							endCol: width - 8,
 						};
-						const visible = wrapped.slice(scrollOffset, scrollOffset + pageSize);
+						const styled = options?.literal
+							? styledPreviewLines(wrapped, theme)
+							: wrapped;
+						const visible = styled.slice(scrollOffset, scrollOffset + pageSize);
 						const border = (text: string) => theme.fg("border", text);
 						const scrollable = totalLines > pageSize;
 						// thumb 几何对齐官方 getScrollbarGeometry：trackHeight=pageSize、

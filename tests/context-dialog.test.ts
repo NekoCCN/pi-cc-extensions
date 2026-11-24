@@ -11,7 +11,7 @@ import {
 	hasActiveTextPreview,
 	resolveUsedTokens,
 	setPreviewCopyImpl,
-	showTextPreview,
+	showTextPreview, styledPreviewLines,
 } from "../extensions/feature/context.ts";
 
 initTheme("dark");
@@ -269,6 +269,30 @@ function textPreviewHarness(
 		},
 	};
 }
+
+test("tool preview styles section headers, input body and separators", async () => {
+	const theme = {
+		fg: (color: string, text: string) =>
+			color === "accent"
+				? `\x1b[36m${text}\x1b[39m`
+				: color === "dim"
+					? `\x1b[2m${text}\x1b[22m`
+					: `\x1b[90m${text}\x1b[39m`,
+		bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
+	};
+	const input = ["Input", "arg one", "", "Output", "result text", "", "───", "", "Second title", "second body"];
+	const out = styledPreviewLines(input, theme);
+	assert.equal(out.length, input.length);
+	const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+	assert.equal(out.map(strip).join("\n"), input.join("\n"));
+	const byText = new Map(out.map((line) => [strip(line), line]));
+	assert.match(byText.get("Input") ?? "", /\x1b\[1m\x1b\[36mInput\x1b\[39m\x1b\[22m/);
+	assert.match(byText.get("Output") ?? "", /\x1b\[1m\x1b\[36mOutput\x1b\[39m\x1b\[22m/);
+	assert.match(byText.get("arg one") ?? "", /^\x1b\[90marg one\x1b\[39m$/);
+	assert.match(byText.get("result text") ?? "", /^result text$/);
+	assert.match(byText.get("───") ?? "", /^\x1b\[2m.*\x1b\[22m$/);
+	assert.match(byText.get("second body") ?? "", /^second body$/);
+});
 
 test("showTextPreview closes from a regular-mode SGR click without overlay layout", async () => {
 	const tui = { terminal: { columns: 80, rows: 24 }, requestRender() {} };
