@@ -14,6 +14,7 @@ import claudeCodeStyleExtension, {
 } from "../extensions/renderer/index.ts";
 import { installToolGrouping, ToolGroupComponent } from "../extensions/renderer/tool/grouping.ts";
 import {
+	formatRoundPreviewBody,
 	scheduleSessionRender,
 	TOOL_MOUSE_DISABLE,
 } from "../extensions/renderer/mouse/interaction.ts";
@@ -1270,6 +1271,31 @@ test("fullscreen tool hint opens a dialog without expanding the transcript card"
 	} finally {
 		installToolMouseInteraction({});
 	}
+});
+
+test("round preview body sections prose, thinking and tools with headings", () => {
+	const fakeTool: any = {
+		toolCallId: "b1",
+		toolName: "bash",
+		args: { command: "one" },
+		result: { content: [{ type: "text", text: "hello output" }] },
+		setExpanded() {},
+		render: () => [],
+	};
+	const body = formatRoundPreviewBody({
+		prose: ["first paragraph", "second paragraph with tail-marker"],
+		thinking: ["plan the round"],
+		tools: [fakeTool],
+	});
+	const responseAt = body.indexOf("Response");
+	const thinkingAt = body.indexOf("Thinking");
+	const toolsAt = body.indexOf("Tools");
+	assert.ok(responseAt >= 0 && thinkingAt > responseAt && toolsAt > thinkingAt);
+	assert.match(body, /first paragraph\n\nsecond paragraph with tail-marker/);
+	assert.match(body, /plan the round/);
+	assert.match(body, /hello output/);
+	assert.ok(body.includes("───"), "sections are separated");
+	assert.equal(formatRoundPreviewBody({ prose: [], thinking: [], tools: [] }), "");
 });
 
 test("a split transcript uses its painted width to locate the modal owner after wrapped text", () => {

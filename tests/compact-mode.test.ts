@@ -29,6 +29,7 @@ import { installCompactThinking } from "../extensions/feature/compact-thinking.t
 import { installDefaultMode } from "../extensions/renderer/default-mode.ts";
 import {
 	buildMessageSummary,
+	getCompactRoundPreview,
 	installCompactMode,
 	isCompactAssistantComponent,
 	markCompactRoundToolExpanded,
@@ -2481,6 +2482,178 @@ test("compact 展开卡：助手文本排在 thinking 前面，不被思考块�
 		if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousDir;
 		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("compact round preview exposes full prose with thinking and tools", async () => {
+	const { restore } = installHooks();
+	const chat = new Container() as any;
+	setToolMouseTui({ children: [chat] });
+	try {
+		const proseHead = "let me check the file";
+		const proseTail = `final detail tail-marker-${"x".repeat(8)}`;
+		const longProse = [
+			proseHead,
+			...Array.from({ length: 30 }, (_, index) => `detail line ${index + 1}`),
+			proseTail,
+		].join("\n");
+		const message = {
+			role: "assistant",
+			timestamp: 1,
+			content: [
+				{ type: "thinking", thinking: "plan the round" },
+				{ type: "text", text: longProse },
+				{ type: "toolCall", id: "b1", name: "bash", arguments: { command: "one" } },
+			],
+		};
+		const anchor = new AssistantMessageComponent(message as any, true) as any;
+		const bash = tool("bash", "b1", { command: "one" });
+		chat.addChild(anchor);
+		chat.addChild(bash);
+		anchor.updateContent(message as any);
+		bash.executionStarted = true;
+		bash.updateDisplay?.();
+		bash.updateResult({ content: [{ type: "text", text: "line one" }], isError: false });
+
+		const round = getCompactRoundPreview(anchor);
+		assert.ok(round, "round preview exists");
+		assert.ok(
+			round.prose.some((text: string) => text.includes(proseHead)),
+			"preview carries the round prose head",
+		);
+		assert.ok(
+			round.prose.some((text: string) => text.includes(proseTail)),
+			"preview carries the full prose tail, not a rendered ellipsis",
+		);
+		assert.ok(
+			round.thinking.some((text: string) => text.includes("plan the round")),
+			"preview keeps thinking",
+		);
+		assert.equal(round.tools.length, 1, "preview keeps the round tools");
+
+		// 收尾纯文本到达同一组件：存档从 round.messages 脱离，lastMessage 兜底仍要收录。
+		const closingTail = `closing tail-marker-${"y".repeat(8)}`;
+		anchor.updateContent({
+			role: "assistant",
+			timestamp: 2,
+			content: [{ type: "text", text: `done. ${closingTail}` }],
+		} as any);
+		await settleFold();
+		const reopened = getCompactRoundPreview(anchor);
+		assert.ok(
+			reopened?.prose.some((text: string) => text.includes(closingTail)),
+			"preview exposes the closing prose stored outside the round messages",
+		);
+
+		// 预览只读存档：transcript 里的回合正文原位不动（收尾 morph 仍按旧存档折叠）。
+		const transcript = renderText(chat).join("\n");
+		assert.ok(transcript.includes(proseHead), "transcript retains the round prose");
+	} finally {
+		setToolMouseTui(null);
+		restore();
+	}
+});
+
+test("compact round preview keeps legitimate repeated prose across components", async () => {
+	const { restore } = installHooks();
+	const chat = new Container() as any;
+	setToolMouseTui({ children: [chat] });
+	try {
+		const repeated = "the same paragraph in two messages";
+		const anchorMessage = {
+			role: "assistant",
+			timestamp: 1,
+			content: [
+				{ type: "text", text: repeated },
+				{ type: "toolCall", id: "b1", name: "bash", arguments: { command: "one" } },
+			],
+		};
+		const anchor = new AssistantMessageComponent(anchorMessage as any, true) as any;
+		const bash = tool("bash", "b1", { command: "one" });
+		chat.addChild(anchor);
+		chat.addChild(bash);
+		anchor.updateContent(anchorMessage as any);
+		bash.executionStarted = true;
+		bash.updateDisplay?.();
+
+		// 同一回合的第二个成员带着逐字相同的正文：合法复述，不得折叠。
+		const memberMessage = {
+			role: "assistant",
+			timestamp: 2,
+			content: [
+				{ type: "text", text: repeated },
+				{ type: "toolCall", id: "g1", name: "grep", arguments: { pattern: "x" } },
+			],
+		};
+		const member = new AssistantMessageComponent(memberMessage as any, true) as any;
+		const grep = tool("grep", "g1", { pattern: "x" });
+		chat.addChild(member);
+		chat.addChild(grep);
+		member.updateContent(memberMessage as any);
+		grep.executionStarted = true;
+		grep.updateDisplay?.();
+
+		const round = getCompactRoundPreview(anchor);
+		assert.ok(round, "round preview exists");
+		assert.equal(
+			round.prose.filter((text: string) => text === repeated).length,
+			2,
+			"identical prose from two components is kept twice",
+		);
+	} finally {
+		setToolMouseTui(null);
+		restore();
+	}
+});
+
+test("compact round preview drops superseded resend of the same snapshot", async () => {
+	const { restore } = installHooks();
+	const chat = new Container() as any;
+	setToolMouseTui({ children: [chat] });
+	try {
+		const repeated = "unchanged paragraph resent without tool calls";
+		const anchor = new AssistantMessageComponent(
+			{
+				role: "assistant",
+				timestamp: 1,
+				content: [
+					{ type: "text", text: repeated },
+					{ type: "toolCall", id: "b1", name: "bash", arguments: { command: "one" } },
+				],
+			} as any,
+			true,
+		) as any;
+		const bash = tool("bash", "b1", { command: "one" });
+		chat.addChild(anchor);
+		chat.addChild(bash);
+		anchor.updateContent({
+			role: "assistant",
+			timestamp: 1,
+			content: [
+				{ type: "text", text: repeated },
+				{ type: "toolCall", id: "b1", name: "bash", arguments: { command: "one" } },
+			],
+		} as any);
+		bash.executionStarted = true;
+		bash.updateDisplay?.();
+
+		// 同一组件形态变为纯文本、内容逐字相同：被取代的重发快照，只留一份。
+		anchor.updateContent({
+			role: "assistant",
+			timestamp: 2,
+			content: [{ type: "text", text: repeated }],
+		} as any);
+		await settleFold();
+		const round = getCompactRoundPreview(anchor);
+		assert.ok(round, "round preview exists");
+		assert.equal(
+			round.prose.filter((text: string) => text === repeated).length,
+			1,
+			"superseded resend collapses to one copy",
+		);
+	} finally {
+		setToolMouseTui(null);
+		restore();
 	}
 });
 

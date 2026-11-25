@@ -167,6 +167,25 @@ function tryOpenToolIoShowMore(region: InteractionRegion): boolean {
 	return true;
 }
 
+/**
+ * 整回合预览正文：正文 / 思考 / 工具三段，各带章节头，段间用分隔线。
+ * literal 纯文本：工具输出保持原生字面，正文不断链截断、用存档全文。
+ */
+export function formatRoundPreviewBody(preview: {
+	thinking: string[];
+	prose: string[];
+	tools: any[];
+}): string {
+	const sections: string[] = [];
+	const prose = (preview.prose ?? []).filter((text) => text.trim());
+	const thinking = (preview.thinking ?? []).filter((text) => text.trim());
+	if (prose.length > 0) sections.push(`Response\n\n${prose.join("\n\n")}`);
+	if (thinking.length > 0) sections.push(`Thinking\n\n${thinking.join("\n\n")}`);
+	const tools = toolPreviewGroup(preview.tools ?? []);
+	if (tools) sections.push(`Tools\n\n${tools}`);
+	return sections.join("\n\n───\n\n");
+}
+
 /** Also used by native card hit regions when the viewport has no precise row mapping. */
 export function tryOpenCardPreview(component: any): boolean {
 	if (!toolMouseInteractionActive()) return false;
@@ -185,7 +204,7 @@ export function tryOpenCardPreview(component: any): boolean {
 		const round = getCompactRoundPreview(component);
 		if (!round) return false;
 		title = "Turn details";
-		body = [...round.thinking, toolPreviewGroup(round.tools)].filter(Boolean).join("\n\n");
+		body = formatRoundPreviewBody(round);
 	} else if (component instanceof ThinkingPreviewBlock) {
 		title = "Thinking";
 		body = component.getPreviewText();

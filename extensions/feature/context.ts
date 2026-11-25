@@ -105,6 +105,9 @@ const ESC_LABEL = "[esc]";
  * 工具预览正文着色：Input/Output 章节头 accent 加粗，分组分隔线变暗，
  * Input 正文变 muted，形成 章节头 > 输入 > 输出 的层次；只对 literal 生效。
  */
+/** 整回合预览的顶层章节头：与工具 Input/Output 同级的 accent 加粗。 */
+const ROUND_SECTION_HEADINGS = new Set(["Response", "Thinking", "Tools"]);
+
 export function styledPreviewLines(lines: string[], theme: any): string[] {
 	if (typeof theme?.fg !== "function") return lines;
 	let section: "input" | "output" | undefined;
@@ -114,6 +117,10 @@ export function styledPreviewLines(lines: string[], theme: any): string[] {
 		const trimmed = line.trim();
 		if (trimmed === "Input" || trimmed === "Output") {
 			section = trimmed.toLowerCase() as "input" | "output";
+			return theme.bold(theme.fg("accent", trimmed));
+		}
+		if (ROUND_SECTION_HEADINGS.has(trimmed)) {
+			section = undefined;
 			return theme.bold(theme.fg("accent", trimmed));
 		}
 		if (trimmed.startsWith("───")) return theme.fg("dim", trimmed);
@@ -380,9 +387,7 @@ export async function showTextPreview(
 							startCol: width - 6 - 1 - visibleWidth(COPY_LABEL),
 							endCol: width - 8,
 						};
-						const styled = options?.literal
-							? styledPreviewLines(wrapped, theme)
-							: wrapped;
+						const styled = options?.literal ? styledPreviewLines(wrapped, theme) : wrapped;
 						const visible = styled.slice(scrollOffset, scrollOffset + pageSize);
 						const border = (text: string) => theme.fg("border", text);
 						const scrollable = totalLines > pageSize;

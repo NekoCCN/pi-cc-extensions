@@ -726,7 +726,7 @@ export function setHoveredCompactAssistant(component: any): boolean {
 let roundToolExpansion:
 	| {
 			markUserExpanded(tool: any): void;
-			preview(component: any): { tools: any[]; thinking: string[] } | undefined;
+			preview(component: any): { tools: any[]; thinking: string[]; prose: string[] } | undefined;
 	  }
 	| undefined;
 
@@ -1294,6 +1294,8 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 		endRequest?: { endTimestamp?: number };
 		/** 段内已冒出外层调用（edit/write/ask）：本段到此为止，不再并入后续消息。 */
 		outerSealed?: boolean;
+		/** 收尾纯文本：已脱离 round.messages、渲染在各自组件上，预览从这里取存档。 */
+		closingProse: string[];
 		/** 消息已有 toolCall、工具组件还没到：等它一 updateDisplay 就重画槽位。 */
 		pendingLiveTool?: boolean;
 		foldTimer?: ReturnType<typeof setTimeout>;
@@ -1569,7 +1571,7 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 					.filter((part: any) => part?.type === "thinking" && typeof part.thinking === "string")
 					.map((part: any) => part.thinking),
 			);
-			return { tools, thinking };
+			return { tools, thinking, prose: roundProseTexts(round) };
 		},
 	};
 
@@ -1577,6 +1579,50 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 		...round.messages.values(),
 		...round.detachedMessages,
 	];
+
+	/** 消息里的非空 assistant text（存档全文，不经渲染截断）。 */
+	const collectTextParts = (message: any): string[] => {
+		const parts: string[] = [];
+		for (const item of Array.isArray(message?.content) ? message.content : []) {
+			if (item?.type !== "text" || typeof item.text !== "string") continue;
+			if (item.text.trim()) parts.push(item.text);
+		}
+		return parts;
+	};
+
+	/**
+	 * 收尾纯文本落盘：只收相对上一份存档新增的段——同一组件的流式快照
+	 * （重发/形态变化）在这里就地去重，不进 closingProse。
+	 * 跨组件的相同正文是合法复述，原样保留。
+	 */
+	const recordClosingProse = (round: CompactRound, previousMessage: any, message: any): void => {
+		const previous = new Set(collectTextParts(previousMessage));
+		for (const text of collectTextParts(message)) {
+			if (!previous.has(text)) round.closingProse.push(text);
+		}
+	};
+
+	/**
+	 * 回合正文（assistant text）：按消息顺序取全量存档文本，收尾纯文本
+	 * （closingProse）排在最后。去重只认对象身份（同一存档被多处引用，
+	 * 如重放/收编）；字符串相同但来源不同的正文一律保留——那是合法复述，
+	 * 不是重复。closingProse 在收尾分支落盘：纯文本消息渲染在各自组件上、
+	 * 已脱离 round.messages，收尾 renderRound 又会把 lastMessage 写回旧存档，
+	 * 事后只能从落盘里取。预览只读存档，transcript 里的正文原位不动。
+	 */
+	const roundProseTexts = (round: CompactRound): string[] => {
+		const seen = new Set<object>();
+		const prose: string[] = [];
+		const pushSnapshot = (message: any): void => {
+			if (!message || typeof message !== "object" || seen.has(message)) return;
+			seen.add(message);
+			for (const text of collectTextParts(message)) prose.push(text);
+		};
+		for (const message of round.messages.values()) pushSnapshot(message);
+		for (const message of round.detachedMessages) pushSnapshot(message);
+		for (const text of round.closingProse) prose.push(text);
+		return prose;
+	};
 
 	const roundToolCallIds = (round: CompactRound): Set<string> => {
 		const ids = new Set<string>();
@@ -1975,6 +2021,7 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 		round.startedAt = prior.startedAt;
 		if (typeof prior.wallStartedAt === "number") round.wallStartedAt = prior.wallStartedAt;
 		if (prior.detachedMessages.length) round.detachedMessages.push(...prior.detachedMessages);
+		if (prior.closingProse.length) round.closingProse.push(...prior.closingProse);
 		if (!prior.active) {
 			round.active = false;
 			round.endedAt = prior.endedAt ?? round.startedAt;
@@ -1995,6 +2042,7 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 			anchor,
 			messages: new Map(),
 			detachedMessages: [],
+			closingProse: [],
 			active: true,
 			suppressedToolIds: new Set(),
 			liveSlotToolIds: new Set(),
@@ -2569,12 +2617,14 @@ export function installCompactMode(deps: CompactModeInstallDeps): CompactModeHoo
 				round.messages.delete(this);
 				clearRoundAnchor(this);
 				round.detachedMessages.push(previousMessage);
+				recordClosingProse(round, previousMessage, message);
 				roundByComponent.delete(this);
 				finishRound(round, message.timestamp);
 				return renderAssistantWithoutThinking(this, message);
 			}
 			if (round) {
 				// 围观态下 anchor 还挂着槽位卡，必须重绘才能收回。
+				recordClosingProse(round, previousMessage, message);
 				endRound(round, true, message.timestamp);
 				roundByComponent.delete(this);
 				clearRoundAnchor(this);

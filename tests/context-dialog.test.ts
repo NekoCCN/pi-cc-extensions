@@ -11,7 +11,8 @@ import {
 	hasActiveTextPreview,
 	resolveUsedTokens,
 	setPreviewCopyImpl,
-	showTextPreview, styledPreviewLines,
+	showTextPreview,
+	styledPreviewLines,
 } from "../extensions/feature/context.ts";
 
 initTheme("dark");
@@ -280,11 +281,25 @@ test("tool preview styles section headers, input body and separators", async () 
 					: `\x1b[90m${text}\x1b[39m`,
 		bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
 	};
-	const input = ["Input   ", "arg one   ", "", "Output   ", "result text   ", "", "───   ", "", "Second title   ", "second body   "];
+	const input = [
+		"Input   ",
+		"arg one   ",
+		"",
+		"Output   ",
+		"result text   ",
+		"",
+		"───   ",
+		"",
+		"Second title   ",
+		"second body   ",
+	];
 	const out = styledPreviewLines(input, theme);
 	assert.equal(out.length, input.length);
 	const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
-	assert.equal(out.map((line) => strip(line).trim()).join("\n"), input.map((line) => line.trim()).join("\n"));
+	assert.equal(
+		out.map((line) => strip(line).trim()).join("\n"),
+		input.map((line) => line.trim()).join("\n"),
+	);
 	const byText = new Map(out.map((line) => [strip(line).trim(), line]));
 	assert.match(byText.get("Input") ?? "", /\x1b\[1m\x1b\[36mInput\x1b\[39m\x1b\[22m/);
 	assert.match(byText.get("Output") ?? "", /\x1b\[1m\x1b\[36mOutput\x1b\[39m\x1b\[22m/);
@@ -292,6 +307,76 @@ test("tool preview styles section headers, input body and separators", async () 
 	assert.match(strip(byText.get("result text") ?? ""), /^result text/);
 	assert.match(byText.get("───") ?? "", /^\x1b\[2m.*\x1b\[22m$/);
 	assert.match(byText.get("second body") ?? "", /^second body\s*$/);
+});
+
+test("tool preview styles round section headings without background", async () => {
+	const theme = {
+		fg: (color: string, text: string) =>
+			color === "accent"
+				? `\x1b[36m${text}\x1b[39m`
+				: color === "dim"
+					? `\x1b[2m${text}\x1b[22m`
+					: `\x1b[90m${text}\x1b[39m`,
+		bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
+		bg: (slot: string, text: string) => `[bg:${slot}]${text}[/bg]`,
+	};
+	const input = [
+		"Response   ",
+		"first paragraph   ",
+		"───   ",
+		"Thinking   ",
+		"plan   ",
+		"───   ",
+		"Tools   ",
+		"Input   ",
+		"arg one   ",
+	];
+	const out = styledPreviewLines(input, theme);
+	assert.equal(out.length, input.length);
+	const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+	assert.equal(
+		out.map((line) => strip(line).trim()).join("\n"),
+		input.map((line) => line.trim()).join("\n"),
+	);
+	for (const heading of ["Response", "Thinking", "Tools"]) {
+		const line = out.find((candidate) => strip(candidate).trim() === heading) ?? "";
+		assert.match(line, /\x1b\[1m\x1b\[36m/, `${heading} is accent bold`);
+	}
+	assert.ok(
+		out.every((line) => !line.includes("[bg:")),
+		"no background added",
+	);
+});
+
+test("showTextPreview wraps long prose and scrolls to the final lines", async () => {
+	const tail = `tail-marker-${"z".repeat(8)}`;
+	const content = [
+		...Array.from({ length: 60 }, (_, index) => `line ${index + 1}`),
+		`a very long prose line ${"w".repeat(200)}`,
+		tail,
+	].join("\n");
+	const theme = {
+		fg: (_color: string, text: string) => text,
+		bold: (text: string) => text,
+		bg: (slot: string, text: string) => `[bg:${slot}]${text}[/bg]`,
+	};
+	const tui = { terminal: { columns: 80, rows: 24 }, requestRender() {} };
+	const ui = textPreviewHarness(theme, (c) => c.render(64), tui);
+	const preview = showTextPreview({ ui } as any, "Turn details", content, { literal: true });
+	const strip = (s: string) => s.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+	const first = strip(ui.component.render(64).join("\n"));
+	const total = Number(first.match(/\/ (\d+) lines/)?.[1] ?? "0");
+	assert.ok(total > 62, `long prose wraps: ${first.split("\n").at(-2)}`);
+	assert.ok(!first.includes(tail), "tail starts out of view");
+
+	ui.component.handleInput("\x1b[F");
+	const last = strip(ui.component.render(64).join("\n"));
+	assert.ok(last.includes(tail), "End reaches the final prose tail");
+	assert.ok(!last.includes("[bg:"), "no background added");
+
+	ui.component.handleInput("\x1b");
+	await preview;
+	assert.equal(hasActiveTextPreview(), false);
 });
 
 test("showTextPreview closes from a regular-mode SGR click without overlay layout", async () => {
