@@ -26,6 +26,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { walkComponentTree } from "../utils/component-tree.ts";
 import { isFullscreenTui } from "../utils/fullscreen-detect.ts";
+import { codeSources } from "./markdown-code-source.ts";
 import {
 	type ActionHit,
 	type ActionHover,
@@ -64,7 +65,8 @@ export interface TableCopyOptions {
 
 export interface TableCopyInstallation {
 	/** Called by the entry point's combined transformer; never changes the source. */
-	noteSource(context: MarkdownTransformContext): void;
+	noteSource(context: MarkdownTransformContext, original?: string, display?: string): void;
+	getResponseCopy(): ((text: string) => void) | undefined;
 	dispose(): void;
 }
 
@@ -132,11 +134,11 @@ type SelectionColumns = (
 interface Rendering {
 	readonly component: MarkdownWithActions;
 	readonly transcript: boolean;
-	native?: CopyFrame<TableToken>;
+	copy: CopyFrame<TableToken>;
 }
 
 interface Patch {
-	version: 4;
+	version: 5;
 	active: boolean;
 	markerPrefix: string;
 	selectionTarget: Prototype;
@@ -148,7 +150,9 @@ interface Patch {
 	components: Set<WeakRef<MarkdownWithActions>>;
 	componentRefs: WeakMap<MarkdownWithActions, WeakRef<MarkdownWithActions>>;
 	componentOwners: WeakMap<MarkdownWithActions, TableCopyOwner>;
-	native?: NativeMarkdownCopy<TableToken>;
+	native: boolean;
+	renderer: NativeMarkdownCopy<TableToken>;
+	codeKeys: WeakMap<MarkdownWithActions, ReadonlySet<string>>;
 	rendering?: Rendering;
 	originalRender: Render;
 	originalRenderTable: RenderTable;
@@ -172,6 +176,7 @@ function marker(patch: Patch, kind: string): string {
 
 function isActionRow(patch: Patch, line: string): boolean {
 	return (
+		line.includes(marker(patch, "code:").slice(0, -2)) ||
 		line.includes(marker(patch, "skip")) ||
 		TABLE_FORMATS.some((format) => line.includes(marker(patch, `action:${format}`)))
 	);
@@ -228,12 +233,16 @@ function bindActions(
 	owner: TableCopyOwner,
 ): void {
 	if (component[ACTIONS_KEY]?.lines === lines && component[ACTIONS_KEY]?.owner === owner) return;
-	const native = patch.rendering?.native;
-	const tokens = native ? undefined : parsedMarkdown(component)?.tokens;
-	const tables = native?.tables ?? (owner.tables !== false && tokens ? collectTables(tokens) : []);
+	const frame = patch.rendering?.copy;
+	const tokens = patch.native ? undefined : parsedMarkdown(component)?.tokens;
+	const tables = patch.native
+		? (frame?.tables ?? [])
+		: owner.tables !== false && tokens
+			? collectTables(tokens)
+			: [];
 	const hits = bindActionRows(
 		lines,
-		{ tables, serialize: serializeTable },
+		{ tables, codes: frame?.codes, serialize: serializeTable },
 		{
 			marker: (kind) => marker(patch, kind),
 			debug: owner.debug,
@@ -255,7 +264,7 @@ function bindActions(
 
 function currentPatch(target: Prototype): Patch | undefined {
 	const held = target[PATCH] as Partial<Patch> | undefined;
-	return held?.version === 4 ? (held as Patch) : undefined;
+	return held?.version === 5 ? (held as Patch) : undefined;
 }
 
 function eligibleOwner(patch: Patch, component: MarkdownWithActions): TableCopyOwner | undefined {
@@ -293,7 +302,36 @@ function trackComponent(patch: Patch, component: MarkdownWithActions): void {
 	patch.components.add(ref);
 }
 
-const NO_INSTALLATION: TableCopyInstallation = { noteSource: () => undefined, dispose() {} };
+const NO_INSTALLATION: TableCopyInstallation = {
+	noteSource: () => undefined,
+	getResponseCopy: () => undefined,
+	dispose() {},
+};
+
+function copyText(
+	patch: Patch,
+	owner: TableCopyOwner,
+	text: string,
+	name: string,
+	errorLabel: string,
+): void {
+	const active = () => patch.owners.has(owner) && isFullscreenTui(owner.tui);
+	if (!active()) return;
+	void Promise.resolve()
+		.then(() => owner.copy(text))
+		.then(
+			() => {
+				if (active()) owner.notify(`Copied ${name}`, false);
+			},
+			(error) => {
+				if (active())
+					owner.notify(
+						`${errorLabel} copy failed: ${error instanceof Error ? error.message : String(error)}`,
+						true,
+					);
+			},
+		);
+}
 
 /**
  * Install only for a fullscreen owner. Shared wrappers stay inert after the last
@@ -307,9 +345,7 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 	let patch = currentPatch(target);
 	if (!patch?.active) {
 		const native =
-			typeof target.ownSources === "function" && typeof target.renderToken === "function"
-				? new NativeMarkdownCopy<TableToken>()
-				: undefined;
+			typeof target.ownSources === "function" && typeof target.renderToken === "function";
 		const required = [
 			[target, "Markdown", "render"],
 			[target, "Markdown", "renderTable"],
@@ -331,7 +367,7 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 		const originalRender = target.render as Render;
 		const originalRenderTable = target.renderTable as RenderTable;
 		const created: Patch = {
-			version: 4,
+			version: 5,
 			active: true,
 			markerPrefix: `\x1b_pi:ccstyle-table-copy:${randomUUID()}:`,
 			selectionTarget,
@@ -376,7 +412,9 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 			components: new Set(),
 			componentRefs: new WeakMap(),
 			componentOwners: new WeakMap(),
+			codeKeys: new WeakMap(),
 			native,
+			renderer: new NativeMarkdownCopy(),
 			originalRender,
 			originalRenderTable,
 			originalHandleMouse: target.handleMouse as HandleMouse | undefined,
@@ -391,7 +429,7 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 				const owner = eligibleOwner(created, this);
 				if (!owner || owner.tables === false || token.header.length === 0) return lines;
 				const frame = created.rendering;
-				if (frame?.component === this && frame.native) frame.native.tables.push(token);
+				if (frame?.component === this && created.native) frame.copy.tables.push(token);
 				else if (!parsedMarkdown(this)) {
 					owner.debug("Table actions skipped: incompatible private API (Markdown.cachedTokens).");
 					return lines;
@@ -407,10 +445,7 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 				const previous = created.rendering;
 				const transcript = isTranscriptComponent(this);
 				if (transcript) markTranscriptComponent(this);
-				const native: CopyFrame<TableToken> | undefined = created.native
-					? { tables: [] }
-					: undefined;
-				const frame: Rendering = { component: this, transcript, native };
+				const frame: Rendering = { component: this, transcript, copy: { tables: [] } };
 				created.rendering = frame;
 				try {
 					// Eligibility affects cached table blocks, unlike hover. Rebuild only
@@ -419,14 +454,13 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 						delete this[ACTIONS_KEY];
 						this.invalidate();
 					}
-					const rendered =
-						native &&
-						created.native?.render(this, native, {
-							owner: () => eligibleOwner(created, this),
-							render: () => created.originalRender.call(this, width),
-						});
-					if (rendered) frame.native = rendered.frame;
-					const lines = rendered ? rendered.lines : created.originalRender.call(this, width);
+					const rendered = created.renderer.render(this, frame.copy, {
+						owner: () => eligibleOwner(created, this),
+						marker: (kind) => marker(created, kind),
+						render: () => created.originalRender.call(this, width),
+					});
+					frame.copy = rendered.frame;
+					const { lines } = rendered;
 					const owner = eligibleOwner(created, this);
 					if (owner) {
 						trackComponent(created, this);
@@ -455,22 +489,8 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 				// Fullscreen release synthesizes click only after capturing this press.
 				if (event.type === "press" && event.button === "left" && hit) return { handled: true };
 				if (event.type === "click" && event.button === "left" && hit) {
-					const text = hit.copy();
 					// Capture the clicked component's owner, never the newest session.
-					void Promise.resolve()
-						.then(() => owner.copy(text))
-						.then(
-							() => {
-								if (created.owners.has(owner)) owner.notify(`Copied ${hit.name}`, false);
-							},
-							(error) => {
-								if (created.owners.has(owner))
-									owner.notify(
-										`${hit.errorLabel} copy failed: ${error instanceof Error ? error.message : String(error)}`,
-										true,
-									);
-							},
-						);
+					copyText(created, owner, hit.copy(), hit.name, hit.errorLabel);
 					return { handled: true };
 				}
 				return created.originalHandleMouse?.call(this, event);
@@ -493,24 +513,45 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 	patch.owners.add(owner);
 	invalidateMountedMarkdown(owner.tui);
 	const held = patch;
+	const responseCopy = (text: string) => copyText(held, owner, text, "response", "Response");
 	return {
-		noteSource(context) {
+		noteSource(context, original, display = original) {
 			const frame = held.rendering;
 			if (!held.active || !held.owners.has(owner) || !frame) return;
 			const component = frame.component;
 			const next = context.messageType === "assistant" && !frame.transcript ? owner : undefined;
 			const previous = held.componentOwners.get(component);
-			if (previous === next) return;
 			const wasEligible = Boolean(eligibleOwner(held, component));
 			if (next) {
 				held.componentOwners.set(component, next);
 				trackComponent(held, component);
 			} else held.componentOwners.delete(component);
-			if (wasEligible !== Boolean(eligibleOwner(held, component))) {
+			const eligible = Boolean(eligibleOwner(held, component));
+			const codes =
+				eligible && original !== undefined && display !== undefined
+					? codeSources(original, display)
+					: undefined;
+			frame.copy.codes = codes;
+			// Pi's per-block cache keys on normalized raw tokens, not whether
+			// they still correspond to literal fences in the original message.
+			let codeEligibilityChanged = false;
+			if (!held.native) {
+				const keys = held.codeKeys.get(component);
+				codeEligibilityChanged =
+					(keys?.size ?? 0) !== (codes?.size ?? 0) ||
+					[...(keys ?? [])].some((key) => !codes?.has(key));
+				if (codeEligibilityChanged) {
+					if (codes?.size) held.codeKeys.set(component, new Set(codes.keys()));
+					else held.codeKeys.delete(component);
+				}
+			}
+			if (wasEligible !== eligible || previous !== next || codeEligibilityChanged) {
 				delete component[ACTIONS_KEY];
 				component.invalidate();
 			}
 		},
+		getResponseCopy: () =>
+			held.owners.has(owner) && isFullscreenTui(owner.tui) ? responseCopy : undefined,
 		dispose() {
 			if (!held.owners.delete(owner)) return;
 			if (held.owners.size === 0) held.active = false;
@@ -522,6 +563,7 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 				}
 				if (held.owners.size > 0 && held.componentOwners.get(component) !== owner) continue;
 				held.componentOwners.delete(component);
+				held.codeKeys.delete(component);
 				held.componentRefs.delete(component);
 				held.components.delete(ref);
 				delete component[ACTIONS_KEY];
@@ -617,7 +659,7 @@ export function createTableCopyNotifier(
 export default function tableCopyExtension(
 	pi: ExtensionAPI,
 	features = { tables: true },
-): Pick<TableCopyInstallation, "noteSource"> {
+): Pick<TableCopyInstallation, "noteSource" | "getResponseCopy"> {
 	let installation: TableCopyInstallation | undefined;
 	let installedTui: TUI | undefined;
 	let disposeNotifier: (() => void) | undefined;
@@ -656,5 +698,9 @@ export default function tableCopyExtension(
 		disposeNotifier = notifier.dispose;
 	});
 	pi.on("session_shutdown", cleanup);
-	return { noteSource: (context) => installation?.noteSource(context) };
+	return {
+		noteSource: (context, original, display) =>
+			installation?.noteSource(context, original, display),
+		getResponseCopy: () => installation?.getResponseCopy(),
+	};
 }

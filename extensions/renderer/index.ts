@@ -58,6 +58,7 @@ import {
 	installFinalResponseFrame,
 	setFinalResponseFrameTheme,
 	type FinalResponseFrameHandle,
+	type FinalResponseFrameOptions,
 } from "./final-response-frame.ts";
 
 /**
@@ -119,6 +120,7 @@ export default function (
 	pi: ExtensionAPI,
 	configOverride?: Partial<Config>,
 	compactThinking?: CompactThinkingController,
+	getResponseCopy?: FinalResponseFrameOptions["getResponseCopy"],
 ) {
 	// 可选 override：集成测试不依赖用户全局配置。
 	if (configOverride) setConfig(normalizeConfig({ ...config, ...configOverride }));
@@ -159,7 +161,7 @@ export default function (
 		const disposeToolExpandedBackground = installToolExpandedBackground();
 		// 最终回答框只包 render，不碰 updateContent 链：装在 compact 之后，
 		// 渲染时读到的是各补丁落定后的组件态。
-		finalResponseFrame = installFinalResponseFrame();
+		finalResponseFrame = installFinalResponseFrame({ getResponseCopy });
 		installation = {
 			defaultMode,
 			toolGrouping,

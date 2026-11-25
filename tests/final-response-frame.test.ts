@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { AssistantMessageComponent, initTheme } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import {
 	FINAL_RESPONSE_FRAME_MIN_WIDTH,
 	installFinalResponseFrame,
@@ -97,7 +97,7 @@ const hasFrame = (lines: string[]) => {
 	return text.includes("╭") && text.includes("╮") && text.includes("╰") && text.includes("╯");
 };
 
-test("final successful text response is framed neutrally", () => {
+test("final successful text response uses the accent border without fill", () => {
 	const seen: string[] = [];
 	const handle = install(seen);
 	try {
@@ -106,8 +106,116 @@ test("final successful text response is framed neutrally", () => {
 		assert.ok(hasFrame(lines), "expected rounded border around final text");
 		assert.ok(plain(lines).includes("修复完成"), "response text stays inside the frame");
 		assert.ok(plain(lines).includes("const x = 1;"), "code stays plain markdown, no extra copy");
-		assert.ok(seen.length > 0 && seen.every((name) => name === "muted"), "border uses only muted");
-		assert.ok(!plain(lines).includes("accent"), "no accent color leaks into the frame");
+		assert.ok(lines[0].startsWith("«borderAccent»╭"));
+		assert.ok(lines[1].startsWith("«borderAccent»│ "));
+		assert.ok(lines[1].endsWith("«borderAccent» │"));
+		assert.ok(lines.at(-1)?.startsWith("«borderAccent»╰"));
+		assert.deepEqual(seen, Array<string>(4).fill("borderAccent"));
+	} finally {
+		handle.dispose();
+	}
+});
+
+const RESPONSE_LABEL = "[Copy response]";
+
+function frameMouse(component: AssistantMessageComponent, width: number, height: number) {
+	return (
+		x: number,
+		y: number,
+		type: TuiMouseEvent["type"] = "click",
+		button: TuiMouseEvent["button"] = "left",
+	) =>
+		component.handleMouse({
+			type,
+			button,
+			x,
+			y,
+			screenX: x,
+			screenY: y,
+			width,
+			height,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		});
+}
+
+test("the top edge copies all original markdown blocks once on a visible left click", () => {
+	const copied: string[] = [];
+	const copy = (text: string) => {
+		copied.push(text);
+	};
+	const options = { sources, getResponseCopy: () => copy };
+	const handle = installFinalResponseFrame(options);
+	try {
+		const first = "  **原文** \n\n```ts\n  const x = 1;\n```\n";
+		const last = "[link](https://example.org)  ";
+		const { component } = create(
+			[
+				{ type: "thinking", thinking: "private reasoning" },
+				{ type: "text", text: first },
+				{ type: "text", text: `\x1b[31m${last}\x1b[0m` },
+			],
+			"stop",
+		);
+		const width = 40;
+		const lines = component.render(width).map(stripTerminalSequences);
+		const row = lines.findIndex((line) => line.startsWith("╭"));
+		assert.ok(row > 0, "the top edge follows the thinking prefix");
+		const edge = lines[row];
+		assert.match(edge, /^╭─+\[Copy response\]─╮$/);
+		assert.equal(visibleWidth(edge), width);
+		const start = edge.indexOf(RESPONSE_LABEL);
+		const end = start + RESPONSE_LABEL.length;
+		const mouse = frameMouse(component, width, lines.length);
+
+		assert.equal(mouse(start - 1, row, "press"), undefined);
+		assert.equal(mouse(end, row), undefined);
+		assert.equal(mouse(start, row, "press", "right"), undefined);
+		assert.equal(mouse(start, row, "click", "middle"), undefined);
+		assert.equal(mouse(start, row, "drag"), undefined);
+		assert.equal(mouse(start, row, "wheel"), undefined);
+		assert.equal(mouse(start, row, "press")?.handled, true);
+		assert.equal(mouse(start, row, "release"), undefined);
+		assert.deepEqual(copied, []);
+		assert.equal(mouse(end - 1, row)?.handled, true);
+		assert.deepEqual(copied, [`${first}\n\n${last}`]);
+	} finally {
+		handle.dispose();
+	}
+});
+
+test("a narrow frame or unavailable copy owner leaves no invisible action", () => {
+	const copied: string[] = [];
+	const copy = (text: string) => {
+		copied.push(text);
+	};
+	let available = true;
+	const options = { sources, getResponseCopy: () => (available ? copy : undefined) };
+	const handle = installFinalResponseFrame(options);
+	try {
+		const { component } = create([{ type: "text", text: FINAL_TEXT }], "stop");
+		const wide = 40;
+		const withCopy = component.render(wide);
+		const x = stripTerminalSequences(withCopy[0]).indexOf(RESPONSE_LABEL);
+		assert.ok(x > 0, "the preceding render must establish a visible hit");
+
+		const narrow = 16;
+		const withoutRoom = component.render(narrow);
+		assert.ok(hasFrame(withoutRoom));
+		assert.ok(!plain(withoutRoom).includes(RESPONSE_LABEL));
+		assert.equal(frameMouse(component, narrow, withoutRoom.length)(1, 0), undefined);
+		assert.equal(frameMouse(component, wide, withCopy.length)(x, 0), undefined);
+
+		component.render(wide);
+		available = false;
+		assert.equal(frameMouse(component, wide, withCopy.length)(x, 0, "press"), undefined);
+		assert.equal(frameMouse(component, wide, withCopy.length)(x, 0), undefined);
+		const withoutOwner = component.render(wide);
+		assert.ok(hasFrame(withoutOwner));
+		assert.ok(!plain(withoutOwner).includes(RESPONSE_LABEL));
+		assert.equal(frameMouse(component, wide, withoutOwner.length)(x, 0), undefined);
+		assert.deepEqual(copied, []);
 	} finally {
 		handle.dispose();
 	}

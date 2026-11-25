@@ -32,21 +32,24 @@ export function configureMarkdownRendering(
 		enableMarkdownEnhance,
 		enableTableCopy,
 	}: { enableMarkdownEnhance: boolean; enableTableCopy: boolean },
-): void {
+): { getResponseCopy(): ((text: string) => void) | undefined } {
 	setMarkdownHeadingStyle(enableMarkdownEnhance);
 	if (enableMarkdownEnhance) {
 		pi.on("session_start", () => setMarkdownHeadingStyle(true));
 		pi.on("session_shutdown", () => setMarkdownHeadingStyle(false));
 	}
 	const copy = enableTableCopy ? tableCopy(pi) : undefined;
-	if (!enableMarkdownEnhance && !copy) return;
-	pi.registerMarkdownTransformer(
-		(markdown, context) => {
-			copy?.noteSource(context);
-			return enableMarkdownEnhance ? transformMarkdown(markdown, context) : markdown;
-		},
-		{ messageTypes: enableMarkdownEnhance ? MARKDOWN_ENHANCE_MESSAGE_TYPES : ["assistant"] },
-	);
+	if (enableMarkdownEnhance || copy) {
+		pi.registerMarkdownTransformer(
+			(markdown, context) => {
+				const display = enableMarkdownEnhance ? transformMarkdown(markdown, context) : markdown;
+				copy?.noteSource(context, markdown, display);
+				return display;
+			},
+			{ messageTypes: enableMarkdownEnhance ? MARKDOWN_ENHANCE_MESSAGE_TYPES : ["assistant"] },
+		);
+	}
+	return { getResponseCopy: () => copy?.getResponseCopy() };
 }
 
 export default function (pi: ExtensionAPI): void {
@@ -65,8 +68,13 @@ export default function (pi: ExtensionAPI): void {
 
 	// render stack：thinking controller 直接交给 style 作 query
 	// 两个功能独立开关，但共享同一个 transformer 注册槽位。
-	configureMarkdownRendering(pi, config);
-	claudeCodeStyle(pi, undefined, installCompactThinking(pi, getCompactThinkingConfig()));
+	const markdown = configureMarkdownRendering(pi, config);
+	claudeCodeStyle(
+		pi,
+		undefined,
+		installCompactThinking(pi, getCompactThinkingConfig()),
+		markdown.getResponseCopy,
+	);
 
 	// features
 	if (config.enableContextCommand) context(pi);

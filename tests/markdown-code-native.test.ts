@@ -48,18 +48,20 @@ function setup(
 			copies.push(value);
 		},
 	});
-	const md = new Markdown(text, 1, 0, theme, undefined, {
-		transform: (markdown, availableWidth) => {
-			const context: MarkdownTransformContext = {
-				messageType: "assistant",
-				isStreaming: state.streaming,
-				availableWidth,
-			};
-			installation.noteSource(context);
-			return transformMarkdown(markdown, context);
-		},
-	});
-	return { md, copies, dispose: installation.dispose };
+	const create = (source: string) =>
+		new Markdown(source, 1, 0, theme, undefined, {
+			transform: (markdown, availableWidth) => {
+				const context: MarkdownTransformContext = {
+					messageType: "assistant",
+					isStreaming: state.streaming,
+					availableWidth,
+				};
+				const display = transformMarkdown(markdown, context);
+				installation.noteSource(context, markdown, display);
+				return display;
+			},
+		});
+	return { md: create(text), create, copies, dispose: installation.dispose };
 }
 
 function click(md: Markdown, point: { x: number; y: number }) {
@@ -75,12 +77,17 @@ function click(md: Markdown, point: { x: number; y: number }) {
 	});
 }
 
-test("fenced code renders natively without copy chrome or frames", () => {
+test("fenced code keeps native highlighting with one separate copy row and no frame", () => {
 	const { md, dispose } = setup(`\`\`\`\`typescript\r\n${code}\r\n\`\`\`\``);
 	try {
 		for (const width of [26, 40]) {
 			const rendered = md.render(width);
 			const plain = rendered.map(stripTerminalSequences).join("\n");
+			assert.equal(
+				rendered.map(stripTerminalSequences).filter((line) => /^\s*\[Copy code\]\s*$/.test(line))
+					.length,
+				1,
+			);
 			assert.doesNotMatch(plain, /\[Copy\]/);
 			assert.doesNotMatch(plain, /[╭╰│]/);
 			assert.match(plain, /const 猫/);
@@ -98,7 +105,7 @@ test("paragraphs render without appended copy actions and links stay clickable",
 	try {
 		const lines = md.render(31);
 		const plain = lines.map(stripTerminalSequences).join("\n");
-		assert.doesNotMatch(plain, /\[Copy\]/);
+		assert.doesNotMatch(plain, /\[Copy(?: code)?\]/);
 		const linkRow = lines.map(stripTerminalSequences).findIndex((line) => line.includes("双语"));
 		assert.ok(linkRow >= 0);
 		assert.equal(getOsc8LinkAtColumn(lines[linkRow], 4), "https://example.com");
@@ -109,7 +116,7 @@ test("paragraphs render without appended copy actions and links stay clickable",
 	}
 });
 
-test("clicking code copies nothing once the inline action is gone", async () => {
+test("only the action copies the exact unwrapped body after resizing", async () => {
 	const { md, copies, dispose } = setup(`~~~typescript\r\n${code}\r\n~~~`);
 	try {
 		const lines = md.render(31);
@@ -119,25 +126,129 @@ test("clicking code copies nothing once the inline action is gone", async () => 
 		click(md, { x: 4, y: row });
 		await Promise.resolve();
 		assert.deepEqual(copies, []);
+		for (const width of [80, 19]) {
+			const y = md
+				.render(width)
+				.findIndex((line) => stripTerminalSequences(line).includes("[Copy code]"));
+			assert.ok(y >= 0);
+			assert.equal(click(md, { x: 1, y })?.handled, true);
+		}
+		await Promise.resolve();
+		assert.deepEqual(copies, [code, code]);
 	} finally {
 		dispose();
 	}
 });
 
-test("a streaming code frame that completes gains no copy chrome", () => {
+test("cached duplicate fences copy each raw occurrence even when their rendered bodies match", async () => {
+	const fence = (body: string) => `\`\`\`ts\n${body}\n\`\`\``;
+	const first = "\t猫();";
+	const second = "   猫();";
+	const hidden = `<!--\n${fence(first)}\n-->`;
+	const initial = `${hidden}\n\n${fence(first)}\n\n${fence(second)}`;
+	const { md, create, copies, dispose } = setup(initial);
+	const shared = create(initial);
+	try {
+		const copyBoth = (component: Markdown) => {
+			component.render(40);
+			const rows = component
+				.render(40)
+				.flatMap((line, y) => (stripTerminalSequences(line).includes("[Copy code]") ? [y] : []));
+			assert.equal(rows.length, 2);
+			for (const y of rows) assert.equal(click(component, { x: 1, y })?.handled, true);
+		};
+		copyBoth(md);
+		copyBoth(shared);
+		md.setText(`${hidden}\n\n${fence(second)}\n\n${fence(first)}`);
+		copyBoth(md);
+		await Promise.resolve();
+		assert.deepEqual(copies, [first, second, first, second, second, first]);
+	} finally {
+		dispose();
+	}
+});
+
+test("quoted fences discard only the quote prefix and indented fences retain original body spaces", async () => {
+	const { md, copies, dispose } = setup(
+		"> > ```ts\n> > \t猫();\n> > > literal\n> > ```\n\n   ~~~ts\n     奥();\n   ~~~",
+	);
+	try {
+		const targets = md.render(60).flatMap((line, y) => {
+			const x = stripTerminalSequences(line).indexOf("[Copy code]");
+			return x < 0 ? [] : [{ x, y }];
+		});
+		assert.equal(targets.length, 2);
+		for (const target of targets) assert.equal(click(md, target)?.handled, true);
+		await Promise.resolve();
+		assert.deepEqual(copies, ["\t猫();\n> literal", "     奥();"]);
+	} finally {
+		dispose();
+	}
+});
+
+test("list-contained fences cannot borrow the copy source of a matching standalone fence", async () => {
+	const { md, copies, dispose } = setup(
+		"- ```ts\n     猫();\n  ```\n\n```ts\n\t猫();\n```\n\n    ```ts\n    not a fence\n    ```",
+	);
+	try {
+		const plain = md.render(60).map(stripTerminalSequences);
+		const targets = plain.flatMap((line, y) => (line.includes("[Copy code]") ? [y] : []));
+		assert.equal(targets.length, 1);
+		assert.ok(targets[0] > plain.findLastIndex((line) => line.includes("猫();")));
+		assert.equal(click(md, { x: 1, y: targets[0] })?.handled, true);
+		await Promise.resolve();
+		assert.deepEqual(copies, ["\t猫();"]);
+	} finally {
+		dispose();
+	}
+});
+
+test("a streaming code block that completes gains a copy action without a frame", () => {
 	const state = { streaming: true };
 	const first = "```ts\nconst 猫 = 1;";
 	const { md, dispose } = setup(first, state);
 	try {
-		md.render(28);
+		assert.doesNotMatch(md.render(28).map(stripTerminalSequences).join("\n"), /\[Copy code\]/);
 		md.setText(`${first}\nreturn 猫;\n\`\`\``);
 		state.streaming = false;
 		const plain = md.render(28).map(stripTerminalSequences).join("\n");
-		assert.doesNotMatch(plain, /\[Copy\]/);
+		assert.match(plain, /\[Copy code\]/);
 		assert.doesNotMatch(plain, /[╭╰│]/);
 		assert.match(plain, /return 猫/);
 	} finally {
 		dispose();
+	}
+});
+
+test("response copy reports success and failure through the shared clipboard path", async () => {
+	const notices: Array<[string, boolean]> = [];
+	const received: string[] = [];
+	const installation = installTableCopy({
+		tui: { mode: "fullscreen" },
+		paint: (_color, value) => value,
+		copy: async (text) => {
+			received.push(text);
+			if (text === "reject") throw new Error("clipboard unavailable");
+		},
+		notify: (message, error) => notices.push([message, error]),
+	});
+	try {
+		const copy = installation.getResponseCopy();
+		assert.ok(copy);
+		copy(" # 猫\r\n\n");
+		copy("reject");
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.deepEqual(received, [" # 猫\r\n\n", "reject"]);
+		assert.deepEqual(notices, [
+			["Copied response", false],
+			["Response copy failed: clipboard unavailable", true],
+		]);
+		installation.dispose();
+		copy("stale");
+		await Promise.resolve();
+		assert.equal(received.length, 2);
+	} finally {
+		installation.dispose();
 	}
 });
 
@@ -153,7 +264,7 @@ test("diagram art renders without copy buttons", async () => {
 	try {
 		for (const width of [30, 90]) {
 			const plain = md.render(width).map(stripTerminalSequences).join("\n");
-			assert.doesNotMatch(plain, /\[Copy\]/);
+			assert.doesNotMatch(plain, /\[Copy(?: code)?\]/);
 			assert.match(plain, /After the diagram: \(1\)/);
 		}
 		await Promise.resolve();
@@ -192,7 +303,7 @@ test("fullscreen code has no frame chrome and drag selection stays native", asyn
 	});
 	const state = { streaming: false };
 	const content = "Before prose\n\n```ts\n  console.log('猫');\n```\n\nAfter prose";
-	const { md, dispose } = setup(content, state, tui);
+	const { md, copies, dispose } = setup(content, state, tui);
 	const passive = new Markdown(content, 1, 0, theme);
 	tui.addChild(md);
 	tui.start();
@@ -206,7 +317,8 @@ test("fullscreen code has no frame chrome and drag selection stays native", asyn
 		passive.render(42);
 		redraw.call(tui);
 		const screen = tui.getScreenLines().map(stripTerminalSequences);
-		assert.doesNotMatch(screen.join("\n"), /\[Copy\]/);
+		const action = screen.findIndex((line) => line.includes("[Copy code]"));
+		assert.ok(action >= 0);
 		assert.doesNotMatch(screen.join("\n"), /[╭╰│]/);
 		assert.ok(screen.some((line) => line.includes("console.log")));
 
@@ -219,21 +331,25 @@ test("fullscreen code has no frame chrome and drag selection stays native", asyn
 		await new Promise((resolve) => setImmediate(resolve));
 		assert.equal(selected.length, 1);
 		assert.match(selected[0], /console\.log\('猫'\)/);
-		assert.doesNotMatch(selected[0], /\[Copy\]/);
+		assert.doesNotMatch(selected[0], /\[Copy(?: code)?\]/);
+		send(1, action, 0);
+		send(1, action, 0, true);
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.deepEqual(copies, ["  console.log('猫');"]);
 	} finally {
 		tui.stop();
 		dispose();
 	}
 });
 
-test("tables keep their copy actions while code has none", async () => {
+test("tables keep their copy actions alongside fenced code", async () => {
 	const { md, copies, dispose } = setup(
 		"| A | B |\n| --- | --- |\n| one | two |\n\n```ts\nlet x = 1;\n```",
 	);
 	try {
 		const lines = md.render(80);
 		const plain = lines.map(stripTerminalSequences);
-		assert.doesNotMatch(plain.join("\n"), /\[Copy\]/);
+		assert.match(plain.join("\n"), /\[Copy code\]/);
 		const target = plain.flatMap((line, y) => {
 			const offset = line.indexOf("Copy TSV");
 			return offset < 0 ? [] : [{ x: offset, y }];

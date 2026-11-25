@@ -88,7 +88,7 @@ function runtime(
 			registration = { transformer, options };
 		},
 	};
-	configureMarkdownRendering(api as never, features);
+	const controller = configureMarkdownRendering(api as never, features);
 	const tui = {
 		mode,
 		children: [] as any[],
@@ -123,6 +123,7 @@ function runtime(
 			: [];
 	return {
 		tui,
+		controller,
 		widgets,
 		handlers,
 		transformers,
@@ -210,7 +211,11 @@ for (const enableMarkdownEnhance of [false, true]) {
 				else if (enableTableCopy) assert.deepEqual(host.options?.messageTypes, ["assistant"]);
 				await host.start();
 				assert.equal(text(host.create(TABLE)).includes("Copy TSV"), enableTableCopy);
-				assert.equal(text(host.create("```ts\nlet x = 1;\n```")).includes("[Copy]"), false);
+				assert.equal(Boolean(host.controller.getResponseCopy()), enableTableCopy);
+				assert.equal(
+					text(host.create("```ts\nlet x = 1;\n```")).includes("[Copy code]"),
+					enableTableCopy,
+				);
 				assert.equal(host.apply("方案①"), enableMarkdownEnhance ? "方案(1)" : "方案①");
 				assert.equal(host.apply("方案①", "assistant-thinking"), "方案①");
 				const diagram = "```sequenceDiagram\nA->>B: hi\n```";
@@ -223,6 +228,25 @@ for (const enableMarkdownEnhance of [false, true]) {
 		});
 	}
 }
+
+test("response copy is available only for this session's fullscreen clipboard installation", async () => {
+	const host = runtime();
+	const regular = runtime(undefined, "regular");
+	try {
+		const get = host.controller.getResponseCopy;
+		const getRegular = regular.controller.getResponseCopy;
+		assert.equal(get(), undefined);
+		await host.start();
+		await regular.start();
+		assert.equal(typeof get(), "function");
+		assert.equal(getRegular(), undefined);
+		await host.stop();
+		assert.equal(get(), undefined);
+	} finally {
+		await host.stop();
+		await regular.stop();
+	}
+});
 
 test("native assistant text is enhanced but native thinking, user text and previews are not", async () => {
 	const host = runtime();
@@ -311,20 +335,24 @@ test("widget lifecycle installs only in fullscreen and handles live mode changes
 	const original = Markdown.prototype.render;
 	const host = runtime(undefined, "regular");
 	const component = host.create(TABLE);
-	host.tui.children.push(component);
+	const code = host.create("```ts\nlet x = 1;\n```");
+	host.tui.children.push(component, code);
 	try {
 		await host.start();
 		assert.equal(Markdown.prototype.render, original);
 		assert.doesNotMatch(text(component), /Copy TSV/);
+		assert.doesNotMatch(text(code), /\[Copy code\]/);
 		const widget = [...host.widgets.values()][0];
 		host.tui.mode = "fullscreen";
 		widget.invalidate();
 		assert.notEqual(Markdown.prototype.render, original);
 		assert.match(text(component), /Copy TSV/);
+		assert.match(text(code), /\[Copy code\]/);
 		host.tui.mode = "regular";
 		widget.invalidate();
 		assert.equal(Markdown.prototype.render, original);
 		assert.doesNotMatch(text(component), /Copy TSV/);
+		assert.doesNotMatch(text(code), /\[Copy code\]/);
 		host.tui.mode = "fullscreen";
 		widget.invalidate();
 		assert.match(text(component), /Copy TSV/);

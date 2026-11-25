@@ -1,6 +1,6 @@
 /**
  * Final-response frame：在 styled transcript 模式（on/compact）下，给唯一一条
- * “已完成、成功、纯文本”的助手最终回答罩一个透明中性圆角框。
+ * “已完成、成功、纯文本”的助手最终回答罩一个透明圆角框。
  *
  * 成框条件（缺一即原生渲染）：
  * - CCStyle 处在激活样式（默认 `config.mode !== "off"`，可注入覆盖）；
@@ -17,16 +17,16 @@
  *
  * 几何：顶 `╭─╮` 底 `╰─╯`，左右 `│ `/` │`，偏移经
  * `copyLineSources` 回填（`"│ "` 可见宽 2），边框行标
- * `null`（选中跳过，与 Box 一致）；OSC133 留内层；边框点击吞掉，内容点击
- * 平移后交 Container（thinking/handoff 命中不变）。
+ * `null`（选中跳过，与 Box 一致）；OSC133 留内层；顶边仅在复制可用且放得下时
+ * 显示按钮，其余边框不处理鼠标，正文坐标平移后交 Container。
  *
- * 不碰 reasoning/工具卡/cancelled/error/流式正文；无 Copy 入口；不改 AGENTS/modal；
+ * 不碰 reasoning/工具卡/cancelled/error/流式正文；不改 AGENTS/modal；
  * 边框行标 null 依赖宿主 setLineSource，缺失时纯文本回退（不深导入）。
  */
 
 import { AssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as tui from "@earendil-works/pi-tui";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 
 import { config } from "../config/config.ts";
 import { patchRegistry } from "../utils/patch-keys.ts";
@@ -45,8 +45,17 @@ const FINAL_RESPONSE_FRAME_PATCH_KEY = Symbol.for("pi.ccstyle.final-response-fra
 const FRAME_SIDE_COLUMNS = 2;
 /** 成框最小渲染宽度：边框 4 列 + 至少 4 列正文，窄于此回退原生。 */
 export const FINAL_RESPONSE_FRAME_MIN_WIDTH = 8;
-/** 中性边框颜色：与工具卡强调色区分，只用 muted。 */
-const FRAME_COLOR_NAME = "muted";
+const FRAME_COLOR_NAME = "borderAccent";
+const RESPONSE_COPY_LABEL = "[Copy response]";
+const RESPONSE_COPY_COLUMNS = visibleWidth(RESPONSE_COPY_LABEL);
+
+type CopyResponse = (text: string) => void;
+
+type ResponseCopyHit = {
+	readonly start: number;
+	readonly copy: CopyResponse;
+	readonly message: AssistantMessageShape;
+};
 
 export type FinalResponseFrameTheme = {
 	fg(name: string, text: string): string;
@@ -73,6 +82,8 @@ export type FinalResponseFrameOptions = {
 	getTheme?: () => FinalResponseFrameTheme | undefined;
 	/** 行来源函数；默认从宿主 pi-tui 解析，测试注入假实现。 */
 	sources?: FinalResponseFrameSources;
+	/** 会话剪贴板入口；不可用时不显示复制按钮。 */
+	getResponseCopy?: () => CopyResponse | undefined;
 };
 
 type ComponentInternals = {
@@ -182,13 +193,17 @@ function renderFramed(
 	inner: string[],
 	prefixLength: number,
 	paintState: FramePaint,
+	copyHit: ResponseCopyHit | undefined,
 ): string[] {
 	const { theme, sources } = paintState;
 	const innerWidth = width - FRAME_SIDE_COLUMNS * 2;
 	const paint = (text: string): string => theme?.fg(FRAME_COLOR_NAME, text) ?? text;
 	const prefix = inner.slice(0, prefixLength);
 	const body = prefixLength ? inner.slice(prefixLength) : inner;
-	const framed = [...prefix, paint(`╭${"─".repeat(innerWidth + 2)}╮`)];
+	const top = copyHit
+		? `╭${"─".repeat(copyHit.start - 1)}${RESPONSE_COPY_LABEL}─╮`
+		: `╭${"─".repeat(innerWidth + 2)}╮`;
+	const framed = [...prefix, paint(top)];
 	const left = paint("│ ");
 	const right = paint(" │");
 	for (const line of body) framed.push(`${left}${padLine(line, innerWidth)}${right}`);
@@ -231,7 +246,7 @@ export function installFinalResponseFrame(
 	const finality: FinalityStore = createFinalResponseFinality();
 	const geometry = new WeakMap<
 		ComponentInternals,
-		{ width: number; prefix: number; rows: number }
+		{ width: number; prefix: number; rows: number; copyHit: ResponseCopyHit | undefined }
 	>();
 	const frameState = (component: ComponentInternals, width: number): FramePaint | undefined => {
 		if (width < FINAL_RESPONSE_FRAME_MIN_WIDTH || !sources) return undefined;
@@ -251,8 +266,12 @@ export function installFinalResponseFrame(
 		if (prefix === undefined) return render.call(this, width);
 		const lines = render.call(this, innerWidth);
 		if (prefix >= lines.length) return render.call(this, width);
-		geometry.set(this, { width, prefix, rows: lines.length });
-		return renderFramed(width, lines, prefix, state);
+		const start = width - FRAME_SIDE_COLUMNS - RESPONSE_COPY_COLUMNS;
+		const copy = start >= FRAME_SIDE_COLUMNS ? options.getResponseCopy?.() : undefined;
+		const message = this.lastMessage;
+		const copyHit = copy && message ? { start, copy, message } : undefined;
+		geometry.set(this, { width, prefix, rows: lines.length, copyHit });
+		return renderFramed(width, lines, prefix, state, copyHit);
 	};
 
 	const framedMouse = function (this: ComponentInternals, event: MouseEventLike): unknown {
@@ -260,8 +279,32 @@ export function installFinalResponseFrame(
 		const frame = geometry.get(this);
 		if (!frame || frame.width !== event.width) return dispatch.call(this, event);
 		const innerWidth = event.width - FRAME_SIDE_COLUMNS * 2;
-		const { prefix, rows } = frame;
-		if (event.y === prefix || event.y > rows) return undefined;
+		const { prefix, rows, copyHit } = frame;
+		if (event.y === prefix) {
+			if (
+				!copyHit ||
+				event.x < copyHit.start ||
+				event.x >= copyHit.start + RESPONSE_COPY_COLUMNS ||
+				event.button !== "left" ||
+				(event.type !== "press" && event.type !== "click") ||
+				this.lastMessage !== copyHit.message ||
+				!isStyleActive() ||
+				options.getResponseCopy?.() !== copyHit.copy
+			)
+				return undefined;
+			// 托管鼠标只有在 press 被处理后，才会在原地 release 时派发 click。
+			if (event.type === "click") {
+				const blocks = copyHit.message.content ?? [];
+				const text = blocks.flatMap((block) =>
+					block.type === "text" && typeof block.text === "string"
+						? [stripTerminalSequences(block.text)]
+						: [],
+				);
+				copyHit.copy(text.join("\n\n"));
+			}
+			return { handled: true };
+		}
+		if (event.y > rows) return undefined;
 		const inside = event.y > prefix;
 		const inner = {
 			...event,
