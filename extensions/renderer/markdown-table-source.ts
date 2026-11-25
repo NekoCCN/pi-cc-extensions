@@ -1,5 +1,9 @@
 import type { TableFormat } from "./markdown-copy-actions.ts";
-import type { CopyBlockToken } from "./markdown-copy-blocks.ts";
+
+interface TokenBase {
+	readonly type?: string;
+	readonly raw?: string;
+}
 
 interface InlineToken {
 	readonly type?: string;
@@ -13,7 +17,7 @@ interface TableCell {
 	readonly tokens?: readonly InlineToken[];
 }
 
-export interface MarkdownToken extends CopyBlockToken {
+export interface MarkdownToken extends TokenBase {
 	readonly tokens?: readonly MarkdownToken[];
 	readonly items?: ReadonlyArray<{ readonly tokens?: readonly MarkdownToken[] }>;
 }

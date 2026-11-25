@@ -1,5 +1,4 @@
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import type { CopyBlock } from "./markdown-copy-blocks.ts";
 
 export const TABLE_FORMATS = ["tsv", "csv", "markdown"] as const;
 export type TableFormat = (typeof TABLE_FORMATS)[number];
@@ -10,7 +9,7 @@ export function tableFormatName(format: TableFormat): string {
 }
 
 interface ClipboardAction {
-	readonly format: TableFormat | "block-copy";
+	readonly format: TableFormat;
 	readonly name: string;
 	readonly errorLabel: string;
 	readonly copy: () => string;
@@ -26,18 +25,8 @@ export interface ActionHit extends ClipboardAction {
 
 export type ActionHover = Pick<ActionHit, "y" | "format">;
 
-export function codeBodyBounds(line: string, mark: (kind: "body-start" | "body-end") => string) {
-	const opening = mark("body-start");
-	const start = line.indexOf(opening);
-	if (start < 0) return undefined;
-	const end = line.indexOf(mark("body-end"), start + opening.length);
-	if (end < 0) return undefined;
-	return { start: visibleWidth(line.slice(0, start)), end: visibleWidth(line.slice(0, end)) };
-}
-
 interface ActionSources<Table> {
 	readonly tables: readonly Table[];
-	readonly blocks: readonly CopyBlock[];
 	readonly serialize: (table: Table, format: TableFormat) => string;
 }
 
@@ -54,13 +43,10 @@ export function bindActionRows<Table>(
 ): ActionHit[] {
 	const { marker, debug } = context;
 	const tableMarker = marker("table");
-	const blockMarker = marker("block-copy");
 	const endMarker = marker("end");
 	const formats = TABLE_FORMATS.map((format) => ({ format, mark: marker(`action:${format}`) }));
 	const tableHits: ActionHit[] = [];
-	const blockHits: ActionHit[] = [];
 	let tableIndex = -1;
-	let blockIndex = 0;
 	for (const [y, line] of lines.entries()) {
 		if (line.includes(tableMarker)) tableIndex++;
 		const table = source.tables[tableIndex];
@@ -89,30 +75,12 @@ export function bindActionRows<Table>(
 				);
 			}
 		}
-		if (!line.includes(blockMarker)) continue;
-		const block = source.blocks[blockIndex++];
-		if (block) {
-			add(
-				blockMarker,
-				{
-					format: "block-copy",
-					name: block.kind,
-					errorLabel: block.kind === "code" ? "Code" : "Paragraph",
-					copy: () => block.payload,
-				},
-				blockHits,
-			);
-		}
 	}
 	if (tableIndex + 1 !== source.tables.length) {
 		tableHits.length = 0;
 		debug("Table actions skipped: Markdown.cachedTokens and internal table markers disagree.");
 	}
-	if (blockIndex !== source.blocks.length) {
-		blockHits.length = 0;
-		debug("Block actions skipped: parsed blocks and internal block markers disagree.");
-	}
-	return [...tableHits, ...blockHits];
+	return tableHits;
 }
 
 /** Layout and hit ranges are independent of hover; recolor only the marker contents. */
@@ -123,12 +91,10 @@ export function paintActionRows(
 		hover,
 		paint,
 		endMarker,
-		blockMuted,
 	}: {
 		readonly hover: ActionHover | undefined;
 		readonly paint: CopyPaint;
 		readonly endMarker: string;
-		readonly blockMuted?: (text: string) => string;
 	},
 ): void {
 	for (const hit of hits) {
@@ -140,10 +106,7 @@ export function paintActionRows(
 		const end = line.indexOf(endMarker, start);
 		if (end < 0) continue;
 		const hovered = hover?.y === hit.y && hover.format === hit.format;
-		const label =
-			!hovered && hit.format === "block-copy" && blockMuted
-				? blockMuted(hit.text)
-				: paint(hovered ? "text" : "dim", hit.text);
+		const label = paint(hovered ? "text" : "dim", hit.text);
 		lines[hit.y] = `${line.slice(0, start)}${label}${line.slice(end)}`;
 	}
 }

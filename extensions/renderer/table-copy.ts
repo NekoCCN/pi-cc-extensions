@@ -30,23 +30,12 @@ import {
 	type ActionHit,
 	type ActionHover,
 	bindActionRows,
-	codeBodyBounds,
 	type CopyPaint,
 	paintActionRows,
 	TABLE_FORMATS,
 	type TableFormat,
 	tableFormatName,
 } from "./markdown-copy-actions.ts";
-import {
-	type BlockCopyStyle,
-	type BlockProvenance,
-	type CopyBlock,
-	type CopyBlockToken,
-	copyableBlocks,
-	type RenderBlock,
-	renderCopyBlock,
-} from "./markdown-copy-blocks.ts";
-import { MarkdownCopySource } from "./markdown-copy-source.ts";
 import { type CopyFrame, NativeMarkdownCopy } from "./markdown-copy-native.ts";
 import {
 	collectTables,
@@ -67,7 +56,6 @@ export interface TableCopyOptions {
 	tui: { readonly mode?: string };
 	paint: CopyPaint;
 	readonly tables?: boolean;
-	readonly blocks?: BlockCopyStyle;
 	copy?: CopyText;
 	notify?: Notify;
 	/** Compatibility diagnostics; defaults to an agent-directory debug log, never stdout. */
@@ -76,7 +64,7 @@ export interface TableCopyOptions {
 
 export interface TableCopyInstallation {
 	/** Called by the entry point's combined transformer; never changes the source. */
-	noteSource(context: MarkdownTransformContext, markdown?: string): MarkdownCopySource | undefined;
+	noteSource(context: MarkdownTransformContext): void;
 	dispose(): void;
 }
 
@@ -144,7 +132,6 @@ type SelectionColumns = (
 interface Rendering {
 	readonly component: MarkdownWithActions;
 	readonly transcript: boolean;
-	blocks?: Map<CopyBlockToken, CopyBlock>;
 	native?: CopyFrame<TableToken>;
 }
 
@@ -161,15 +148,12 @@ interface Patch {
 	components: Set<WeakRef<MarkdownWithActions>>;
 	componentRefs: WeakMap<MarkdownWithActions, WeakRef<MarkdownWithActions>>;
 	componentOwners: WeakMap<MarkdownWithActions, TableCopyOwner>;
-	blockSources: WeakMap<MarkdownWithActions, BlockProvenance>;
-	native?: NativeMarkdownCopy<TableCopyOwner, TableToken>;
+	native?: NativeMarkdownCopy<TableToken>;
 	rendering?: Rendering;
 	originalRender: Render;
-	originalRenderBlock?: RenderBlock;
 	originalRenderTable: RenderTable;
 	originalHandleMouse?: HandleMouse;
 	wrappedRender: Render;
-	wrappedRenderBlock: RenderBlock;
 	wrappedRenderTable: RenderTable;
 	wrappedHandleMouse: HandleMouse;
 }
@@ -236,17 +220,6 @@ function parsedMarkdown(component: MarkdownWithActions) {
 	return Array.isArray(parsed?.tokens) ? parsed : undefined;
 }
 
-function parsedCopyBlocks(patch: Patch, component: MarkdownWithActions) {
-	const frame = patch.rendering;
-	if (frame?.component !== component) return undefined;
-	const provenance = patch.blockSources.get(component);
-	const cache = parsedMarkdown(component);
-	if (!frame.blocks && provenance && cache && typeof cache.source === "string") {
-		frame.blocks = copyableBlocks(cache, provenance);
-	}
-	return frame.blocks;
-}
-
 /** Rebuild hit regions after every new render; identical cached lines reuse them. */
 function bindActions(
 	patch: Patch,
@@ -258,12 +231,9 @@ function bindActions(
 	const native = patch.rendering?.native;
 	const tokens = native ? undefined : parsedMarkdown(component)?.tokens;
 	const tables = native?.tables ?? (owner.tables !== false && tokens ? collectTables(tokens) : []);
-	const blocks =
-		native?.blocks ??
-		(owner.blocks ? [...(parsedCopyBlocks(patch, component)?.values() ?? [])] : []);
 	const hits = bindActionRows(
 		lines,
-		{ tables, blocks, serialize: serializeTable },
+		{ tables, serialize: serializeTable },
 		{
 			marker: (kind) => marker(patch, kind),
 			debug: owner.debug,
@@ -279,7 +249,6 @@ function bindActions(
 		hover,
 		paint: owner.paint,
 		endMarker: marker(patch, "end"),
-		blockMuted: owner.blocks?.muted,
 	});
 	component[ACTIONS_KEY] = { owner, lines, hits, hover };
 }
@@ -339,7 +308,7 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 	if (!patch?.active) {
 		const native =
 			typeof target.ownSources === "function" && typeof target.renderToken === "function"
-				? new NativeMarkdownCopy<TableCopyOwner, TableToken>()
+				? new NativeMarkdownCopy<TableToken>()
 				: undefined;
 		const required = [
 			[target, "Markdown", "render"],
@@ -379,10 +348,7 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 				);
 				if (!created.active) return columns;
 				if (isActionRow(created, line)) return { start: columns.start, end: columns.start };
-				const body = codeBodyBounds(line, (kind) => marker(created, kind));
-				return body
-					? { start: Math.max(columns.start, body.start), end: Math.min(columns.end, body.end) }
-					: columns;
+				return columns;
 			},
 			wrappedSelectionText() {
 				const text = created.originalSelectionText.call(this);
@@ -410,11 +376,8 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 			components: new Set(),
 			componentRefs: new WeakMap(),
 			componentOwners: new WeakMap(),
-			blockSources: new WeakMap(),
 			native,
 			originalRender,
-			originalRenderBlock:
-				typeof target.renderBlock === "function" ? (target.renderBlock as RenderBlock) : undefined,
 			originalRenderTable,
 			originalHandleMouse: target.handleMouse as HandleMouse | undefined,
 			wrappedRenderTable(token, availableWidth, nextTokenType, styleContext) {
@@ -439,31 +402,14 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 				if (trailingBlank !== undefined) lines.push(trailingBlank);
 				return lines;
 			},
-			wrappedRenderBlock(...args) {
-				const render = created.originalRenderBlock;
-				if (!render) return;
-				const style = eligibleOwner(created, this)?.blocks;
-				const block = style ? parsedCopyBlocks(created, this)?.get(args[1]) : undefined;
-				if (!style || !block) {
-					render.apply(this, args);
-					return;
-				}
-				renderCopyBlock(
-					this,
-					{ render, args },
-					{
-						...style,
-						kind: block.kind,
-						marks: (kind) => marker(created, kind),
-					},
-				);
-			},
 			wrappedRender(width) {
 				if (!created.active) return created.originalRender.call(this, width);
 				const previous = created.rendering;
 				const transcript = isTranscriptComponent(this);
 				if (transcript) markTranscriptComponent(this);
-				const native = created.native ? { tables: [], blocks: [] } : undefined;
+				const native: CopyFrame<TableToken> | undefined = created.native
+					? { tables: [] }
+					: undefined;
 				const frame: Rendering = { component: this, transcript, native };
 				created.rendering = frame;
 				try {
@@ -477,8 +423,6 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 						native &&
 						created.native?.render(this, native, {
 							owner: () => eligibleOwner(created, this),
-							provenance: () => created.blockSources.get(this),
-							marks: (kind) => marker(created, kind),
 							render: () => created.originalRender.call(this, width),
 						});
 					if (rendered) frame.native = rendered.frame;
@@ -533,7 +477,6 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 			},
 		};
 		target.renderTable = created.wrappedRenderTable;
-		if (created.originalRenderBlock) target.renderBlock = created.wrappedRenderBlock;
 		target.render = created.wrappedRender;
 		target.handleMouse = created.wrappedHandleMouse;
 		selectionTarget.getActiveSelectionText = created.wrappedSelectionText;
@@ -551,24 +494,13 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 	invalidateMountedMarkdown(owner.tui);
 	const held = patch;
 	return {
-		noteSource(context, markdown) {
+		noteSource(context) {
 			const frame = held.rendering;
-			if (!held.active || !held.owners.has(owner) || !frame) return undefined;
+			if (!held.active || !held.owners.has(owner) || !frame) return;
 			const component = frame.component;
 			const next = context.messageType === "assistant" && !frame.transcript ? owner : undefined;
-			const source =
-				next?.blocks && markdown !== undefined && (held.originalRenderBlock || held.native)
-					? new MarkdownCopySource(markdown)
-					: undefined;
-			if (source) {
-				held.blockSources.set(component, {
-					source,
-					streaming: context.isStreaming,
-					width: context.availableWidth,
-				});
-			} else held.blockSources.delete(component);
 			const previous = held.componentOwners.get(component);
-			if (previous === next) return source;
+			if (previous === next) return;
 			const wasEligible = Boolean(eligibleOwner(held, component));
 			if (next) {
 				held.componentOwners.set(component, next);
@@ -578,7 +510,6 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 				delete component[ACTIONS_KEY];
 				component.invalidate();
 			}
-			return source;
 		},
 		dispose() {
 			if (!held.owners.delete(owner)) return;
@@ -591,7 +522,6 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 				}
 				if (held.owners.size > 0 && held.componentOwners.get(component) !== owner) continue;
 				held.componentOwners.delete(component);
-				held.blockSources.delete(component);
 				held.componentRefs.delete(component);
 				held.components.delete(ref);
 				delete component[ACTIONS_KEY];
@@ -599,8 +529,6 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 			}
 			if (held.active) return;
 			if (target.render === held.wrappedRender) target.render = held.originalRender;
-			if (target.renderBlock === held.wrappedRenderBlock)
-				target.renderBlock = held.originalRenderBlock;
 			if (target.renderTable === held.wrappedRenderTable)
 				target.renderTable = held.originalRenderTable;
 			if (target.handleMouse === held.wrappedHandleMouse) {
@@ -688,7 +616,7 @@ export function createTableCopyNotifier(
 /** Lifecycle only; the package entry point composes our marker with enhancement. */
 export default function tableCopyExtension(
 	pi: ExtensionAPI,
-	features = { tables: true, blocks: false },
+	features = { tables: true },
 ): Pick<TableCopyInstallation, "noteSource"> {
 	let installation: TableCopyInstallation | undefined;
 	let installedTui: TUI | undefined;
@@ -720,12 +648,6 @@ export default function tableCopyExtension(
 					notify,
 					paint: (color, text) => ctx.ui.theme.fg(color, text),
 					tables: features.tables,
-					blocks: features.blocks
-						? {
-								border: (text) => ctx.ui.theme.fg("borderMuted", text),
-								muted: (text) => ctx.ui.theme.fg("muted", text),
-							}
-						: undefined,
 				});
 				installedTui = tui;
 			}
@@ -734,5 +656,5 @@ export default function tableCopyExtension(
 		disposeNotifier = notifier.dispose;
 	});
 	pi.on("session_shutdown", cleanup);
-	return { noteSource: (context, markdown) => installation?.noteSource(context, markdown) };
+	return { noteSource: (context) => installation?.noteSource(context) };
 }

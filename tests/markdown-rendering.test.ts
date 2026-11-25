@@ -210,10 +210,7 @@ for (const enableMarkdownEnhance of [false, true]) {
 				else if (enableTableCopy) assert.deepEqual(host.options?.messageTypes, ["assistant"]);
 				await host.start();
 				assert.equal(text(host.create(TABLE)).includes("Copy TSV"), enableTableCopy);
-				assert.equal(
-					text(host.create("```ts\nlet x = 1;\n```")).includes("[Copy]"),
-					enableMarkdownEnhance,
-				);
+				assert.equal(text(host.create("```ts\nlet x = 1;\n```")).includes("[Copy]"), false);
 				assert.equal(host.apply("方案①"), enableMarkdownEnhance ? "方案(1)" : "方案①");
 				assert.equal(host.apply("方案①", "assistant-thinking"), "方案①");
 				const diagram = "```sequenceDiagram\nA->>B: hi\n```";

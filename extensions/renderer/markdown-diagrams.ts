@@ -1,5 +1,4 @@
 import { diagramKind, render as renderMermaid, sourceBox } from "grok-mermaid";
-import type { MarkdownCopySource, MarkdownEdit } from "./markdown-copy-source.ts";
 
 // Standard Mermaid stays with the host renderer. Only convert grok-mermaid's dialect fences.
 const DIAGRAM_FENCE =
@@ -49,19 +48,16 @@ function getArt(src: string): ReturnType<typeof renderMermaid> | null {
 	return art;
 }
 
-/** Keep generated art (or a source fallback) separate from copyable authored blocks. */
+/** Standard Mermaid stays with the host renderer; only grok-mermaid dialects become art. */
 export function renderDiagrams(
 	markdown: string,
 	context?: { readonly isStreaming?: boolean; readonly availableWidth?: number },
-	source?: MarkdownCopySource,
 ): string {
 	const { isStreaming = false, availableWidth = 80 } = context ?? {};
 	if (isStreaming) return markdown;
 	const lines = markdown.split("\n");
 	const out: string[] = [];
-	const edits: MarkdownEdit[] = [];
 	let i = 0;
-	let offset = 0;
 	while (i < lines.length) {
 		const line = lines[i];
 		const fence = line.match(DIAGRAM_FENCE);
@@ -72,24 +68,17 @@ export function renderDiagrams(
 				const src = diagramKind(diagram) ? diagram : `${fence[2]}\n${diagram}`;
 				const art = getArt(src);
 				// Hard breaks keep the diagram's rows separate without wrapping its box glyphs together.
-				const display =
+				out.push(
 					art && art.width <= availableWidth
 						? art.plain.map(codeSpan).join("  \n")
-						: framedSource(src, availableWidth);
-				out.push(display);
-				const length = lines.slice(i, next).join("\n").length;
-				if (source)
-					edits.push({ start: offset, length, replacementLength: display.length, generated: true });
-				offset += length + 1;
+						: framedSource(src, availableWidth),
+				);
 				i = next;
 				continue;
 			}
 		}
 		out.push(line);
-		offset += line.length + 1;
 		i++;
 	}
-	const result = out.join("\n");
-	source?.record(result, edits);
-	return result;
+	return out.join("\n");
 }

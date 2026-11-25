@@ -4,7 +4,6 @@ import type {
 	MarkdownTransformContext,
 } from "@earendil-works/pi-coding-agent";
 import * as tui from "@earendil-works/pi-tui";
-import type { MarkdownCopySource, MarkdownEdit } from "./markdown-copy-source.ts";
 import { renderDiagrams } from "./markdown-diagrams.ts";
 
 const HEADING_STYLE = Symbol.for("pi.ccstyle.markdown-heading-style");
@@ -136,28 +135,17 @@ function scanMarkdownFence(
 	};
 }
 
-function deCircled(markdown: string, source?: MarkdownCopySource): string {
+function deCircled(markdown: string): string {
 	let fence: MarkdownFence | undefined;
-	let offset = 0;
-	const edits: MarkdownEdit[] = [];
-	const result = markdown
+	return markdown
 		.split("\n")
 		.map((line) => {
-			const start = offset;
-			offset += line.length + 1;
 			const scanned = scanMarkdownFence(line, fence);
 			fence = scanned.fence;
 			if (scanned.protected) return line;
-			return line.replace(CIRCLED_RE, (ch: string, index: number) => {
-				const replacement = `(${ch.charCodeAt(0) - 0x2460 + 1})`;
-				if (source)
-					edits.push({ start: start + index, length: 1, replacementLength: replacement.length });
-				return replacement;
-			});
+			return line.replace(CIRCLED_RE, (ch: string) => `(${ch.charCodeAt(0) - 0x2460 + 1})`);
 		})
 		.join("\n");
-	source?.record(result, edits);
-	return result;
 }
 
 // ============================================================================
@@ -170,26 +158,16 @@ function deCircled(markdown: string, source?: MarkdownCopySource): string {
 const MULTILINE_LINK_RE = /(?<!\x1b)\[([^\]\n\x1b]*(?:\n[^\]\n\x1b]*)+)\](?=\()/g;
 
 /** 防止 Markdown 跨行链接把行尾填充空格纳入 OSC 8 点击区。 */
-function normalizeMultilineLinks(markdown: string, source?: MarkdownCopySource): string {
+function normalizeMultilineLinks(markdown: string): string {
 	const out: string[] = [];
 	let prose: string[] = [];
-	let proseOffset = 0;
-	let offset = 0;
-	const edits: MarkdownEdit[] = [];
 	let fence: MarkdownFence | undefined;
 	const flush = () => {
 		if (prose.length === 0) return;
 		out.push(
-			prose.join("\n").replace(MULTILINE_LINK_RE, (match, label: string, index: number) => {
+			prose.join("\n").replace(MULTILINE_LINK_RE, (_match, label: string) => {
 				const normalized = label.replace(/[ \t]*\r?\n[ \t]*/g, " ").trim();
-				const replacement = `[${normalized}]`;
-				if (source)
-					edits.push({
-						start: proseOffset + index,
-						length: match.length,
-						replacementLength: replacement.length,
-					});
-				return replacement;
+				return `[${normalized}]`;
 			}),
 		);
 		prose = [];
@@ -201,16 +179,10 @@ function normalizeMultilineLinks(markdown: string, source?: MarkdownCopySource):
 		fence = scanned.fence;
 		if (opening || closing) flush();
 		if (scanned.protected) out.push(line);
-		else {
-			if (prose.length === 0) proseOffset = offset;
-			prose.push(line);
-		}
-		offset += line.length + 1;
+		else prose.push(line);
 	}
 	flush();
-	const result = out.join("\n");
-	source?.record(result, edits);
-	return result;
+	return out.join("\n");
 }
 
 // ============================================================================
@@ -229,15 +201,14 @@ export const MARKDOWN_ENHANCE_MESSAGE_TYPES: readonly MarkdownMessageType[] = [
 export function transformMarkdown(
 	markdown: string,
 	context?: Partial<MarkdownTransformContext>,
-	source?: MarkdownCopySource,
 ): string {
 	const { messageType, isStreaming = false } = context ?? {};
 	// thinking 保持原文；普通回复即使流式中也先关闭跨行链接的空白点击区。
 	if (messageType === "assistant-thinking") return markdown;
-	markdown = normalizeMultilineLinks(markdown, source);
+	markdown = normalizeMultilineLinks(markdown);
 	if (isStreaming) return markdown;
-	markdown = deCircled(markdown, source);
-	return renderDiagrams(markdown, context, source);
+	markdown = deCircled(markdown);
+	return renderDiagrams(markdown, context);
 }
 
 export default function (pi: ExtensionAPI): void {

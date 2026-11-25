@@ -38,12 +38,12 @@ export function configureMarkdownRendering(
 		pi.on("session_start", () => setMarkdownHeadingStyle(true));
 		pi.on("session_shutdown", () => setMarkdownHeadingStyle(false));
 	}
-	if (!enableMarkdownEnhance && !enableTableCopy) return;
-	const copy = tableCopy(pi, { tables: enableTableCopy, blocks: enableMarkdownEnhance });
+	const copy = enableTableCopy ? tableCopy(pi) : undefined;
+	if (!enableMarkdownEnhance && !copy) return;
 	pi.registerMarkdownTransformer(
 		(markdown, context) => {
-			const source = copy.noteSource(context, markdown);
-			return enableMarkdownEnhance ? transformMarkdown(markdown, context, source) : markdown;
+			copy?.noteSource(context);
+			return enableMarkdownEnhance ? transformMarkdown(markdown, context) : markdown;
 		},
 		{ messageTypes: enableMarkdownEnhance ? MARKDOWN_ENHANCE_MESSAGE_TYPES : ["assistant"] },
 	);
