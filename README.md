@@ -39,6 +39,8 @@ pi install git:github.com/minuque/pi-cc-extensions
 
 `on` / `compact` 两种模式的渲染样例：[默认模式](./docs/tool-render-examples-default.md) · [紧凑模式](./docs/tool-render-examples-compact.md)
 
+全屏模式下，开启 Markdown 增强后，助手回复里的围栏代码会显示语言和 `[Copy]`。点击代码框的 `[Copy]` 复制代码（不含围栏），点击段落下方的 `[Copy]` 只复制该段 Markdown 原文。紧凑回合的 `click to show more` 可打开详情，阅读已保存的正文、思考和工具输入／输出；用 `Home` / `End` 到达首尾，`Esc` 返回。OmO 右侧 `AGENTS` 的原生详情由独立的 `agent-detail-style` 扩展负责。
+
 ## 配置
 
 `/ccstyle` 的行为由 `~/.pi/agent/pi-cc-extensions.json` 配置：

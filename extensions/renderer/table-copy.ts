@@ -1,5 +1,5 @@
 /**
- * Add Grok-style whole-table copy actions to Pi's Markdown tables.
+ * Add hover and copy actions to fullscreen assistant Markdown.
  *
  * Pi's transformer supplies provenance; a removable Markdown prototype patch
  * adds mouse actions only to fullscreen assistant-body instances. This module
@@ -19,7 +19,6 @@ import {
 import {
 	Markdown,
 	TuiAltScreen,
-	stripTerminalSequences,
 	visibleWidth,
 	type TUI,
 	type TuiMouseEvent,
@@ -27,20 +26,48 @@ import {
 } from "@earendil-works/pi-tui";
 import { walkComponentTree } from "../utils/component-tree.ts";
 import { isFullscreenTui } from "../utils/fullscreen-detect.ts";
+import {
+	type ActionHit,
+	type ActionHover,
+	bindActionRows,
+	codeBodyBounds,
+	type CopyPaint,
+	paintActionRows,
+	TABLE_FORMATS,
+	type TableFormat,
+	tableFormatName,
+} from "./markdown-copy-actions.ts";
+import {
+	type BlockCopyStyle,
+	type BlockProvenance,
+	type CopyBlock,
+	type CopyBlockToken,
+	copyableBlocks,
+	type RenderBlock,
+	renderCopyBlock,
+} from "./markdown-copy-blocks.ts";
+import { MarkdownCopySource } from "./markdown-copy-source.ts";
+import { type CopyFrame, NativeMarkdownCopy } from "./markdown-copy-native.ts";
+import {
+	collectTables,
+	type MarkdownToken,
+	serializeTable,
+	type TableToken,
+} from "./markdown-table-source.ts";
 import { isTranscriptComponent, markTranscriptComponent } from "./transcript-scope.ts";
+
+export { serializeTable };
 
 const PATCH = Symbol.for("pi.ccstyle.markdown-table-copy");
 const ACTIONS_KEY = Symbol.for("pi.ccstyle.markdown-table-copy.actions");
-const FORMATS = ["tsv", "csv", "markdown"] as const;
-
-type Format = (typeof FORMATS)[number];
 type CopyText = (text: string) => Promise<void>;
 type Notify = (message: string, isError: boolean) => void;
-type Paint = (color: "dim" | "text", text: string) => string;
 
 export interface TableCopyOptions {
 	tui: { readonly mode?: string };
-	paint: Paint;
+	paint: CopyPaint;
+	readonly tables?: boolean;
+	readonly blocks?: BlockCopyStyle;
 	copy?: CopyText;
 	notify?: Notify;
 	/** Compatibility diagnostics; defaults to an agent-directory debug log, never stdout. */
@@ -49,7 +76,7 @@ export interface TableCopyOptions {
 
 export interface TableCopyInstallation {
 	/** Called by the entry point's combined transformer; never changes the source. */
-	noteSource(context: MarkdownTransformContext): void;
+	noteSource(context: MarkdownTransformContext, markdown?: string): MarkdownCopySource | undefined;
 	dispose(): void;
 }
 
@@ -59,54 +86,16 @@ interface TableCopyOwner extends TableCopyOptions {
 	debug: (message: string) => void;
 }
 
-interface InlineToken {
-	type?: string;
-	text?: string;
-	raw?: string;
-	tokens?: InlineToken[];
-}
-
-interface TableCell {
-	text: string;
-	tokens?: InlineToken[];
-}
-
-interface TableToken {
-	type: "table";
-	raw: string;
-	header: TableCell[];
-	rows: TableCell[][];
-	tokens?: MarkdownToken[];
-	items?: MarkdownToken[];
-}
-
-interface MarkdownToken {
-	type?: string;
-	raw?: string;
-	tokens?: MarkdownToken[];
-	items?: Array<{ tokens?: MarkdownToken[] }>;
-}
-
 interface MarkdownInternals {
-	cachedTokens?: { deref(): { tokens: MarkdownToken[] } | undefined };
+	cachedTokens?: { deref(): { tokens: MarkdownToken[]; source: string } | undefined };
 	clearRenderCache?: () => void;
-}
-
-interface ActionHit {
-	y: number;
-	start: number;
-	end: number;
-	format: Format;
-	marker: string;
-	text: string;
-	table: TableToken;
 }
 
 interface ActionState {
 	owner: TableCopyOwner;
 	lines: string[];
 	hits: ActionHit[];
-	hover?: { y: number; format: Format };
+	hover?: ActionHover;
 }
 
 interface MarkdownWithActions extends Markdown {
@@ -152,8 +141,15 @@ type SelectionColumns = (
 	maxColumn?: number,
 ) => { start: number; end: number };
 
+interface Rendering {
+	readonly component: MarkdownWithActions;
+	readonly transcript: boolean;
+	blocks?: Map<CopyBlockToken, CopyBlock>;
+	native?: CopyFrame<TableToken>;
+}
+
 interface Patch {
-	version: 3;
+	version: 4;
 	active: boolean;
 	markerPrefix: string;
 	selectionTarget: Prototype;
@@ -165,20 +161,24 @@ interface Patch {
 	components: Set<WeakRef<MarkdownWithActions>>;
 	componentRefs: WeakMap<MarkdownWithActions, WeakRef<MarkdownWithActions>>;
 	componentOwners: WeakMap<MarkdownWithActions, TableCopyOwner>;
-	rendering?: { component: MarkdownWithActions; transcript: boolean };
+	blockSources: WeakMap<MarkdownWithActions, BlockProvenance>;
+	native?: NativeMarkdownCopy<TableCopyOwner, TableToken>;
+	rendering?: Rendering;
 	originalRender: Render;
+	originalRenderBlock?: RenderBlock;
 	originalRenderTable: RenderTable;
 	originalHandleMouse?: HandleMouse;
 	wrappedRender: Render;
+	wrappedRenderBlock: RenderBlock;
 	wrappedRenderTable: RenderTable;
 	wrappedHandleMouse: HandleMouse;
 }
 
 type Prototype = Record<PropertyKey, unknown>;
 
-function label(format: Format, compact = false): string {
+function label(format: TableFormat, compact = false): string {
 	if (compact) return `[${format === "markdown" ? "MD" : format.toUpperCase()}]`;
-	return `[Copy ${format === "markdown" ? "Markdown" : format.toUpperCase()}]`;
+	return `[Copy ${tableFormatName(format)}]`;
 }
 
 /** Zero-width APC markers survive caches; real terminals require ST, not BEL. */
@@ -187,7 +187,10 @@ function marker(patch: Patch, kind: string): string {
 }
 
 function isActionRow(patch: Patch, line: string): boolean {
-	return FORMATS.some((format) => line.includes(marker(patch, `action:${format}`)));
+	return (
+		line.includes(marker(patch, "skip")) ||
+		TABLE_FORMATS.some((format) => line.includes(marker(patch, `action:${format}`)))
+	);
 }
 
 function diagnostics(options: TableCopyOptions): (message: string) => void {
@@ -212,47 +215,13 @@ function diagnostics(options: TableCopyOptions): (message: string) => void {
 	};
 }
 
-/** Inline Markdown copies as readable cell text, without ANSI or formatting markers. */
-function inlineText(tokens: InlineToken[] | undefined, fallback: string): string {
-	if (!tokens?.length) return fallback;
-	return tokens
-		.map((token) => {
-			if (token.type === "br") return " ";
-			if (token.tokens?.length) return inlineText(token.tokens, "");
-			return token.text ?? token.raw ?? "";
-		})
-		.join("");
-}
-
-function cellText(cell: TableCell): string {
-	return inlineText(cell.tokens, cell.text).replaceAll("\r\n", "\n").replaceAll("\r", "\n");
-}
-
-function tableRows(token: TableToken): string[][] {
-	return [token.header, ...token.rows].map((row) => row.map(cellText));
-}
-
-function csvCell(text: string): string {
-	return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
-}
-
-/** Serialize the parsed table, never the terminal border or its wrapping. */
-export function serializeTable(token: TableToken, format: Format): string {
-	if (format === "markdown") return token.raw.replace(/(?:\r?\n)+$/, "");
-	const rows = tableRows(token);
-	if (format === "tsv") {
-		return rows.map((row) => row.map((cell) => cell.replace(/[\t\n]/g, " ")).join("\t")).join("\n");
-	}
-	return rows.map((row) => row.map(csvCell).join(",")).join("\n");
-}
-
 function actionLines(patch: Patch, availableWidth: number): string[] {
 	const compact = visibleWidth(label("markdown")) > availableWidth;
-	const labels = FORMATS.map((format) => label(format, compact));
+	const labels = TABLE_FORMATS.map((format) => label(format, compact));
 	// Even the compact labels need five columns. Hide actions rather than render
 	// a broken label or an unidentifiable one-character button below that width.
 	if (labels.some((text) => visibleWidth(text) > availableWidth)) return [];
-	const actions = FORMATS.map(
+	const actions = TABLE_FORMATS.map(
 		(format, index) =>
 			`${marker(patch, `action:${format}`)}${labels[index]}${marker(patch, "end")}`,
 	);
@@ -261,53 +230,21 @@ function actionLines(patch: Patch, availableWidth: number): string[] {
 	return actions;
 }
 
-function collectTables(tokens: MarkdownToken[], output: TableToken[] = []): TableToken[] {
-	for (const token of tokens) {
-		if (token.type === "table") {
-			const table = token as TableToken;
-			if (table.header.length > 0) output.push(table);
-		}
-		if (token.tokens?.length) collectTables(token.tokens, output);
-		for (const item of token.items ?? []) {
-			if (item.tokens?.length) collectTables(item.tokens, output);
-		}
-	}
-	return output;
-}
-
-function parsedTokens(component: MarkdownWithActions): MarkdownToken[] | undefined {
+function parsedMarkdown(component: MarkdownWithActions) {
 	const cache = (component as unknown as MarkdownInternals).cachedTokens;
-	const tokens = typeof cache?.deref === "function" ? cache.deref()?.tokens : undefined;
-	return Array.isArray(tokens) ? tokens : undefined;
+	const parsed = typeof cache?.deref === "function" ? cache.deref() : undefined;
+	return Array.isArray(parsed?.tokens) ? parsed : undefined;
 }
 
-function paintActions(
-	patch: Patch,
-	lines: string[],
-	hits: ActionHit[],
-	hover: ActionState["hover"],
-	paint: Paint,
-): void {
-	const byLine = new Map<number, ActionHit[]>();
-	for (const hit of hits) {
-		const row = byLine.get(hit.y) ?? [];
-		row.push(hit);
-		byLine.set(hit.y, row);
+function parsedCopyBlocks(patch: Patch, component: MarkdownWithActions) {
+	const frame = patch.rendering;
+	if (frame?.component !== component) return undefined;
+	const provenance = patch.blockSources.get(component);
+	const cache = parsedMarkdown(component);
+	if (!frame.blocks && provenance && cache && typeof cache.source === "string") {
+		frame.blocks = copyableBlocks(cache, provenance);
 	}
-	for (const [y, row] of byLine) {
-		const replacements = row
-			.map((hit) => ({ hit, index: lines[y]!.indexOf(hit.marker) }))
-			.filter(({ index }) => index >= 0)
-			.sort((a, b) => b.index - a.index);
-		for (const { hit, index } of replacements) {
-			const start = index + hit.marker.length;
-			const end = lines[y]!.indexOf(marker(patch, "end"), start);
-			if (end < 0) continue;
-			const hovered = hover?.y === hit.y && hover.format === hit.format;
-			const styled = paint(hovered ? "text" : "dim", hit.text);
-			lines[y] = `${lines[y]!.slice(0, start)}${styled}${lines[y]!.slice(end)}`;
-		}
-	}
+	return frame.blocks;
 }
 
 /** Rebuild hit regions after every new render; identical cached lines reuse them. */
@@ -318,56 +255,38 @@ function bindActions(
 	owner: TableCopyOwner,
 ): void {
 	if (component[ACTIONS_KEY]?.lines === lines && component[ACTIONS_KEY]?.owner === owner) return;
-	const hits: ActionHit[] = [];
-	const tokens = parsedTokens(component);
-	const tables = tokens ? collectTables(tokens) : [];
-	let tableIndex = -1;
-	for (let y = 0; y < lines.length; y++) {
-		const line = lines[y]!;
-		if (line.includes(marker(patch, "table"))) tableIndex++;
-		const table = tables[tableIndex];
-		if (!table) continue;
-		for (const format of FORMATS) {
-			const actionMarker = marker(patch, `action:${format}`);
-			const index = line.indexOf(actionMarker);
-			if (index < 0) continue;
-			const contentStart = index + actionMarker.length;
-			const contentEnd = line.indexOf(marker(patch, "end"), contentStart);
-			if (contentEnd < 0) continue;
-			const text = stripTerminalSequences(line.slice(contentStart, contentEnd));
-			const start = visibleWidth(line.slice(0, contentStart));
-			hits.push({
-				y,
-				start,
-				end: start + visibleWidth(text),
-				format,
-				marker: actionMarker,
-				text,
-				table,
-			});
-		}
-	}
-	// Only internal markers are anchors. Model-written labels never affect the
-	// count, while hidden narrow actions still have a marked table in the order.
-	if (tableIndex + 1 !== tables.length) {
-		hits.length = 0;
-		owner.debug(
-			"Table actions skipped: Markdown.cachedTokens and internal table markers disagree.",
-		);
-	}
+	const native = patch.rendering?.native;
+	const tokens = native ? undefined : parsedMarkdown(component)?.tokens;
+	const tables = native?.tables ?? (owner.tables !== false && tokens ? collectTables(tokens) : []);
+	const blocks =
+		native?.blocks ??
+		(owner.blocks ? [...(parsedCopyBlocks(patch, component)?.values() ?? [])] : []);
+	const hits = bindActionRows(
+		lines,
+		{ tables, blocks, serialize: serializeTable },
+		{
+			marker: (kind) => marker(patch, kind),
+			debug: owner.debug,
+		},
+	);
 	const previousHover = component[ACTIONS_KEY]?.hover;
 	const hover = hits.some(
 		(hit) => hit.y === previousHover?.y && hit.format === previousHover?.format,
 	)
 		? previousHover
 		: undefined;
-	paintActions(patch, lines, hits, hover, owner.paint);
+	paintActionRows(lines, hits, {
+		hover,
+		paint: owner.paint,
+		endMarker: marker(patch, "end"),
+		blockMuted: owner.blocks?.muted,
+	});
 	component[ACTIONS_KEY] = { owner, lines, hits, hover };
 }
 
 function currentPatch(target: Prototype): Patch | undefined {
 	const held = target[PATCH] as Partial<Patch> | undefined;
-	return held?.version === 3 ? (held as Patch) : undefined;
+	return held?.version === 4 ? (held as Patch) : undefined;
 }
 
 function eligibleOwner(patch: Patch, component: MarkdownWithActions): TableCopyOwner | undefined {
@@ -405,7 +324,7 @@ function trackComponent(patch: Patch, component: MarkdownWithActions): void {
 	patch.components.add(ref);
 }
 
-const NO_INSTALLATION: TableCopyInstallation = { noteSource() {}, dispose() {} };
+const NO_INSTALLATION: TableCopyInstallation = { noteSource: () => undefined, dispose() {} };
 
 /**
  * Install only for a fullscreen owner. Shared wrappers stay inert after the last
@@ -418,10 +337,14 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 	const selectionTarget = TuiAltScreen.prototype as unknown as Prototype;
 	let patch = currentPatch(target);
 	if (!patch?.active) {
+		const native =
+			typeof target.ownSources === "function" && typeof target.renderToken === "function"
+				? new NativeMarkdownCopy<TableCopyOwner, TableToken>()
+				: undefined;
 		const required = [
 			[target, "Markdown", "render"],
 			[target, "Markdown", "renderTable"],
-			[target, "Markdown", "clearRenderCache"],
+			...(native ? [] : ([[target, "Markdown", "clearRenderCache"]] as const)),
 			[selectionTarget, "TuiAltScreen", "getActiveSelectionText"],
 			[selectionTarget, "TuiAltScreen", "getSelectionColumns"],
 			[selectionTarget, "TuiAltScreen", "getSelectionBounds"],
@@ -439,7 +362,7 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 		const originalRender = target.render as Render;
 		const originalRenderTable = target.renderTable as RenderTable;
 		const created: Patch = {
-			version: 3,
+			version: 4,
 			active: true,
 			markerPrefix: `\x1b_pi:ccstyle-table-copy:${randomUUID()}:`,
 			selectionTarget,
@@ -454,8 +377,11 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 					minColumn,
 					maxColumn,
 				);
-				return created.active && isActionRow(created, line)
-					? { start: columns.start, end: columns.start }
+				if (!created.active) return columns;
+				if (isActionRow(created, line)) return { start: columns.start, end: columns.start };
+				const body = codeBodyBounds(line, (kind) => marker(created, kind));
+				return body
+					? { start: Math.max(columns.start, body.start), end: Math.min(columns.end, body.end) }
 					: columns;
 			},
 			wrappedSelectionText() {
@@ -484,7 +410,11 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 			components: new Set(),
 			componentRefs: new WeakMap(),
 			componentOwners: new WeakMap(),
+			blockSources: new WeakMap(),
+			native,
 			originalRender,
+			originalRenderBlock:
+				typeof target.renderBlock === "function" ? (target.renderBlock as RenderBlock) : undefined,
 			originalRenderTable,
 			originalHandleMouse: target.handleMouse as HandleMouse | undefined,
 			wrappedRenderTable(token, availableWidth, nextTokenType, styleContext) {
@@ -496,8 +426,10 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 					styleContext,
 				);
 				const owner = eligibleOwner(created, this);
-				if (!owner || token.header.length === 0) return lines;
-				if (!parsedTokens(this)) {
+				if (!owner || owner.tables === false || token.header.length === 0) return lines;
+				const frame = created.rendering;
+				if (frame?.component === this && frame.native) frame.native.tables.push(token);
+				else if (!parsedMarkdown(this)) {
 					owner.debug("Table actions skipped: incompatible private API (Markdown.cachedTokens).");
 					return lines;
 				}
@@ -507,12 +439,33 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 				if (trailingBlank !== undefined) lines.push(trailingBlank);
 				return lines;
 			},
+			wrappedRenderBlock(...args) {
+				const render = created.originalRenderBlock;
+				if (!render) return;
+				const style = eligibleOwner(created, this)?.blocks;
+				const block = style ? parsedCopyBlocks(created, this)?.get(args[1]) : undefined;
+				if (!style || !block) {
+					render.apply(this, args);
+					return;
+				}
+				renderCopyBlock(
+					this,
+					{ render, args },
+					{
+						...style,
+						kind: block.kind,
+						marks: (kind) => marker(created, kind),
+					},
+				);
+			},
 			wrappedRender(width) {
 				if (!created.active) return created.originalRender.call(this, width);
 				const previous = created.rendering;
 				const transcript = isTranscriptComponent(this);
 				if (transcript) markTranscriptComponent(this);
-				created.rendering = { component: this, transcript };
+				const native = created.native ? { tables: [], blocks: [] } : undefined;
+				const frame: Rendering = { component: this, transcript, native };
+				created.rendering = frame;
 				try {
 					// Eligibility affects cached table blocks, unlike hover. Rebuild only
 					// when it changes (including runtime regular/fullscreen switches).
@@ -520,7 +473,16 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 						delete this[ACTIONS_KEY];
 						this.invalidate();
 					}
-					const lines = created.originalRender.call(this, width);
+					const rendered =
+						native &&
+						created.native?.render(this, native, {
+							owner: () => eligibleOwner(created, this),
+							provenance: () => created.blockSources.get(this),
+							marks: (kind) => marker(created, kind),
+							render: () => created.originalRender.call(this, width),
+						});
+					if (rendered) frame.native = rendered.frame;
+					const lines = rendered ? rendered.lines : created.originalRender.call(this, width);
 					const owner = eligibleOwner(created, this);
 					if (owner) {
 						trackComponent(created, this);
@@ -549,19 +511,18 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 				// Fullscreen release synthesizes click only after capturing this press.
 				if (event.type === "press" && event.button === "left" && hit) return { handled: true };
 				if (event.type === "click" && event.button === "left" && hit) {
-					const text = serializeTable(hit.table, hit.format);
-					const name = hit.format === "markdown" ? "Markdown" : hit.format.toUpperCase();
+					const text = hit.copy();
 					// Capture the clicked component's owner, never the newest session.
 					void Promise.resolve()
 						.then(() => owner.copy(text))
 						.then(
 							() => {
-								if (created.owners.has(owner)) owner.notify(`Copied table as ${name}`, false);
+								if (created.owners.has(owner)) owner.notify(`Copied ${hit.name}`, false);
 							},
 							(error) => {
 								if (created.owners.has(owner))
 									owner.notify(
-										`Table copy failed: ${error instanceof Error ? error.message : String(error)}`,
+										`${hit.errorLabel} copy failed: ${error instanceof Error ? error.message : String(error)}`,
 										true,
 									);
 							},
@@ -572,6 +533,7 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 			},
 		};
 		target.renderTable = created.wrappedRenderTable;
+		if (created.originalRenderBlock) target.renderBlock = created.wrappedRenderBlock;
 		target.render = created.wrappedRender;
 		target.handleMouse = created.wrappedHandleMouse;
 		selectionTarget.getActiveSelectionText = created.wrappedSelectionText;
@@ -589,13 +551,24 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 	invalidateMountedMarkdown(owner.tui);
 	const held = patch;
 	return {
-		noteSource(context) {
+		noteSource(context, markdown) {
 			const frame = held.rendering;
-			if (!held.active || !held.owners.has(owner) || !frame) return;
+			if (!held.active || !held.owners.has(owner) || !frame) return undefined;
 			const component = frame.component;
 			const next = context.messageType === "assistant" && !frame.transcript ? owner : undefined;
+			const source =
+				next?.blocks && markdown !== undefined && (held.originalRenderBlock || held.native)
+					? new MarkdownCopySource(markdown)
+					: undefined;
+			if (source) {
+				held.blockSources.set(component, {
+					source,
+					streaming: context.isStreaming,
+					width: context.availableWidth,
+				});
+			} else held.blockSources.delete(component);
 			const previous = held.componentOwners.get(component);
-			if (previous === next) return;
+			if (previous === next) return source;
 			const wasEligible = Boolean(eligibleOwner(held, component));
 			if (next) {
 				held.componentOwners.set(component, next);
@@ -605,6 +578,7 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 				delete component[ACTIONS_KEY];
 				component.invalidate();
 			}
+			return source;
 		},
 		dispose() {
 			if (!held.owners.delete(owner)) return;
@@ -617,6 +591,7 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 				}
 				if (held.owners.size > 0 && held.componentOwners.get(component) !== owner) continue;
 				held.componentOwners.delete(component);
+				held.blockSources.delete(component);
 				held.componentRefs.delete(component);
 				held.components.delete(ref);
 				delete component[ACTIONS_KEY];
@@ -624,6 +599,8 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 			}
 			if (held.active) return;
 			if (target.render === held.wrappedRender) target.render = held.originalRender;
+			if (target.renderBlock === held.wrappedRenderBlock)
+				target.renderBlock = held.originalRenderBlock;
 			if (target.renderTable === held.wrappedRenderTable)
 				target.renderTable = held.originalRenderTable;
 			if (target.handleMouse === held.wrappedHandleMouse) {
@@ -711,6 +688,7 @@ export function createTableCopyNotifier(
 /** Lifecycle only; the package entry point composes our marker with enhancement. */
 export default function tableCopyExtension(
 	pi: ExtensionAPI,
+	features = { tables: true, blocks: false },
 ): Pick<TableCopyInstallation, "noteSource"> {
 	let installation: TableCopyInstallation | undefined;
 	let installedTui: TUI | undefined;
@@ -741,6 +719,13 @@ export default function tableCopyExtension(
 					tui,
 					notify,
 					paint: (color, text) => ctx.ui.theme.fg(color, text),
+					tables: features.tables,
+					blocks: features.blocks
+						? {
+								border: (text) => ctx.ui.theme.fg("borderMuted", text),
+								muted: (text) => ctx.ui.theme.fg("muted", text),
+							}
+						: undefined,
 				});
 				installedTui = tui;
 			}
@@ -749,5 +734,5 @@ export default function tableCopyExtension(
 		disposeNotifier = notifier.dispose;
 	});
 	pi.on("session_shutdown", cleanup);
-	return { noteSource: (context) => installation?.noteSource(context) };
+	return { noteSource: (context, markdown) => installation?.noteSource(context, markdown) };
 }
