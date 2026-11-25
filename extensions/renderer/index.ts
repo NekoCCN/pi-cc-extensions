@@ -54,6 +54,11 @@ import {
 	installSubagentNotificationRenderer,
 	refreshSubagentNotifications,
 } from "./tool/subagent-notification.ts";
+import {
+	installFinalResponseFrame,
+	setFinalResponseFrameTheme,
+	type FinalResponseFrameHandle,
+} from "./final-response-frame.ts";
 
 /**
  * Claude Code Style for pi — 装配入口。
@@ -64,12 +69,14 @@ import {
  */
 
 let compactModeHooks: CompactModeHooks | undefined;
+let finalResponseFrame: FinalResponseFrameHandle | undefined;
 
 function refreshCurrentTranscript(ctx?: any, toolGrouping?: ToolGroupingHooks): void {
 	const tui = getToolMouseTui();
 	toolGrouping?.refresh(tui);
 	refreshMessageDisplays(tui);
 	refreshSubagentNotifications(tui);
+	finalResponseFrame?.refresh(tui);
 	refreshCompactModeComponents(tui);
 	compactModeHooks?.refresh();
 	tui?.requestRender?.(true);
@@ -125,6 +132,7 @@ export default function (
 				disposeMessageDisplay: () => void;
 				disposeSubagentNotificationRenderer: () => void;
 				disposeToolExpandedBackground: () => void;
+				finalResponseFrame: FinalResponseFrameHandle;
 		  }
 		| undefined;
 
@@ -149,6 +157,9 @@ export default function (
 		const disposeSubagentNotificationRenderer = installSubagentNotificationRenderer();
 		// 展开背景必须在 compact-mode 之后装，shutdown 时先于 compact 释放。
 		const disposeToolExpandedBackground = installToolExpandedBackground();
+		// 最终回答框只包 render，不碰 updateContent 链：装在 compact 之后，
+		// 渲染时读到的是各补丁落定后的组件态。
+		finalResponseFrame = installFinalResponseFrame();
 		installation = {
 			defaultMode,
 			toolGrouping,
@@ -156,6 +167,7 @@ export default function (
 			disposeMessageDisplay,
 			disposeSubagentNotificationRenderer,
 			disposeToolExpandedBackground,
+			finalResponseFrame,
 		};
 		return installation;
 	};
@@ -216,6 +228,14 @@ export default function (
 		}
 	});
 
+	// 最终回答候选：message_end 只暂存签名。原生在 message_end 后仍标
+	// streaming（引用已丢弃，不会再回标），此时翻转为时过早——迟到的增量
+	// 会让框闪一下又消失。真正的翻转等 agent_end 结算确认。
+	pi.on("message_end", async (event) => {
+		if (event.message?.role !== "assistant") return;
+		finalResponseFrame?.stageFinalCandidate(event.message);
+	});
+
 	// 回到底部按钮的累计计数：离开底部期间每落一块内容 +1。
 	pi.on("message_start", async (event) => {
 		const role = event.message?.role;
@@ -255,6 +275,7 @@ export default function (
 		if (!hooks) return;
 		hooks.toolGrouping.setTheme(ctx.ui.theme);
 		setMessageDisplayTheme(ctx.ui.theme);
+		setFinalResponseFrameTheme(ctx.ui.theme);
 		setStickyPromptTheme(ctx.ui.theme);
 		ctx.ui.setStatus("ccstyle", undefined);
 		// 先收集 resume transcript，再同步 compact 补丁与全局展开状态。
@@ -280,6 +301,7 @@ export default function (
 		if (!hooks) return;
 		hooks.toolGrouping.setTheme(ctx.ui.theme);
 		setMessageDisplayTheme(ctx.ui.theme);
+		setFinalResponseFrameTheme(ctx.ui.theme);
 		setStickyPromptTheme(ctx.ui.theme);
 		syncCompactMode(ctx);
 		scheduleSessionRender(() => {
@@ -304,8 +326,13 @@ export default function (
 		clearLiveToolCalls();
 	});
 
-	pi.on("agent_end", async () => {
+	pi.on("agent_end", async (event) => {
 		clearLiveToolCalls();
+		// 结算确认：候选签名与 agent 消息表交集命中的流式组件才翻为非流式，
+		// 框随重渲染出现。fullscreen 与 regular 共用组件，同一棵树上收口。
+		const flipped =
+			finalResponseFrame?.confirmFinalResponses(getToolMouseTui(), event?.messages) ?? 0;
+		if (flipped > 0) getToolMouseTui()?.requestRender?.(true);
 		// 这轮跑完：末尾回合没有正文收口（纯工具回合）就一直挂着 Running。
 		compactModeHooks?.settleFinishedRound();
 	});
@@ -327,6 +354,8 @@ export default function (
 		compactModeHooks = undefined;
 		current.disposeMessageDisplay();
 		current.disposeSubagentNotificationRenderer();
+		current.finalResponseFrame.dispose();
+		finalResponseFrame = undefined;
 		disposeStickyPromptPatches();
 		clearAllAnimations();
 		installation = undefined;
