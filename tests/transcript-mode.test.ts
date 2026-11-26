@@ -339,6 +339,8 @@ test("展开键打开全屏浏览层", () => {
 	withExpandKey(() => {
 		const t = setupEntry("compact");
 		try {
+			assert.equal(t.send("\t"), undefined, "leave editor completion to Pi");
+			assert.equal(t.send("\x1b[Z"), undefined, "leave reverse Tab to Pi");
 			assert.deepEqual(t.send(CTRL_O), { consume: true });
 			assert.equal(isTranscriptModeActive(), true);
 			assert.equal(t.opened.length, 1);

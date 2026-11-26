@@ -8,7 +8,6 @@ import {
 } from "../../utils/patch-keys.ts";
 import { ToolGroupComponent } from "../tool/grouping.ts";
 import {
-	getCompactRoundPreview,
 	isCompactAssistantComponent,
 	markCompactRoundToolExpanded,
 	setHoveredCompactAssistant,
@@ -20,9 +19,7 @@ import {
 	getToolResultView,
 	isNativeExplorationGroup,
 } from "../tool/native-identity.ts";
-import { messageDisplayPreview } from "../tool/message-display.ts";
-import { toolPreviewBody, toolPreviewGroup, toolPreviewTitle } from "../tool/preview.ts";
-import { subagentNotificationPreview } from "../tool/subagent-notification.ts";
+import { cardPreview } from "../tool/card-preview.ts";
 import {
 	type ExpandedToolIoView,
 	getActiveIoViewFrame,
@@ -167,63 +164,19 @@ function tryOpenToolIoShowMore(region: InteractionRegion): boolean {
 	return true;
 }
 
-/**
- * 整回合预览正文：正文 / 思考 / 工具三段，各带章节头，段间用分隔线。
- * literal 纯文本：工具输出保持原生字面，正文不断链截断、用存档全文。
- */
-export function formatRoundPreviewBody(preview: {
-	thinking: string[];
-	prose: string[];
-	tools: any[];
-}): string {
-	const sections: string[] = [];
-	const prose = (preview.prose ?? []).filter((text) => text.trim());
-	const thinking = (preview.thinking ?? []).filter((text) => text.trim());
-	if (prose.length > 0) sections.push(`Response\n\n${prose.join("\n\n")}`);
-	if (thinking.length > 0) sections.push(`Thinking\n\n${thinking.join("\n\n")}`);
-	const tools = toolPreviewGroup(preview.tools ?? []);
-	if (tools) sections.push(`Tools\n\n${tools}`);
-	return sections.join("\n\n───\n\n");
-}
+export { formatRoundPreviewBody } from "../tool/card-preview.ts";
 
 /** Also used by native card hit regions when the viewport has no precise row mapping. */
 export function tryOpenCardPreview(component: any): boolean {
-	if (!toolMouseInteractionActive()) return false;
+	if (!toolMouseInteractionActive() || isNativeExplorationGroup(component)) return false;
 	const ui = toolMouseUi;
 	if (typeof ui?.custom !== "function") return false;
-	let title: string;
-	let body: string;
-	let literal = true;
-	if (component instanceof ToolGroupComponent) {
-		title = "Multiple Tools";
-		body = toolPreviewGroup(component.children);
-	} else if (isToolExecutionComponent(component)) {
-		title = toolPreviewTitle(component);
-		body = toolPreviewBody(component);
-	} else if (isCompactAssistantComponent(component)) {
-		const round = getCompactRoundPreview(component);
-		if (!round) return false;
-		title = "Turn details";
-		body = formatRoundPreviewBody(round);
-	} else if (component instanceof ThinkingPreviewBlock) {
-		title = "Thinking";
-		body = component.getPreviewText();
-	} else {
-		const message = messageDisplayPreview(component);
-		if (message) {
-			({ title, body } = message);
-			literal = false;
-		} else {
-			const notification = subagentNotificationPreview(component);
-			if (notification === undefined) return false;
-			title = "Subagent details";
-			body = notification;
-		}
-	}
+	const preview = cardPreview(component);
+	if (!preview) return false;
 	clearPendingCollapsePress();
-	void showTextPreview({ ui }, title, body || "(no details available)", { literal }).catch(() => {
-		ui.notify?.("Could not open details", "warning");
-	});
+	void showTextPreview({ ui }, preview.title, preview.body() || "(no details available)", {
+		literal: preview.literal,
+	}).catch(() => ui.notify?.("Could not open details", "warning"));
 	return true;
 }
 

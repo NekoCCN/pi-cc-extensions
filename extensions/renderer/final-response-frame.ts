@@ -26,10 +26,11 @@
 
 import { AssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as tui from "@earendil-works/pi-tui";
-import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 import { config } from "../config/config.ts";
 import { patchRegistry } from "../utils/patch-keys.ts";
+import { responseCopyText } from "./clipboard-actions.ts";
 import {
 	createFinalResponseFinality,
 	isFinalResponseContent,
@@ -116,6 +117,8 @@ export type FinalResponseFrameHandle = {
 	stageFinalCandidate(message: unknown): boolean;
 	/** agent_end 结算确认并翻转命中的流式组件。返回翻转数。 */
 	confirmFinalResponses(root: unknown, agentMessages: unknown): number;
+	/** Semantic availability, independent of mouse frame geometry. */
+	canCopyResponse(component: AssistantMessageComponent): boolean;
 };
 
 let activeTheme: FinalResponseFrameTheme | undefined;
@@ -170,12 +173,15 @@ function answerPrefix(component: ComponentInternals, width: number): number | un
 	return children.slice(0, first).reduce((rows, child) => rows + child.render(width).length, 0);
 }
 
-function shouldFrame(component: ComponentInternals, isStyleActive: () => boolean): boolean {
-	if (!isStyleActive()) return false;
-	if (isTranscriptComponent(component)) return false;
-	if (component.hasToolCalls === true) return false;
-	if (component.providerErrorOwned === true) return false;
-	return isFinalResponseContent(component.lastMessage);
+export function isResponseCopyReady(component: object, settled = false): boolean {
+	const state = asComponent(component);
+	return (
+		state !== undefined &&
+		(state.isStreaming === false || settled) &&
+		state.hasToolCalls !== true &&
+		state.providerErrorOwned !== true &&
+		isFinalResponseContent(state.lastMessage)
+	);
 }
 
 function padLine(line: string, width: number): string {
@@ -236,6 +242,7 @@ export function installFinalResponseFrame(
 			refresh: () => 0,
 			stageFinalCandidate: () => false,
 			confirmFinalResponses: () => 0,
+			canCopyResponse: isResponseCopyReady,
 		};
 	}
 
@@ -244,15 +251,16 @@ export function installFinalResponseFrame(
 	const getTheme = options.getTheme ?? (() => activeTheme);
 	/** 终答结算状态机：message_end 暂存，agent_end 确认。每次安装独立一份。 */
 	const finality: FinalityStore = createFinalResponseFinality();
+	const canCopyResponse = (component: object) =>
+		isResponseCopyReady(component, finality.isFramed(component));
 	const geometry = new WeakMap<
 		ComponentInternals,
 		{ width: number; prefix: number; rows: number; copyHit: ResponseCopyHit | undefined }
 	>();
 	const frameState = (component: ComponentInternals, width: number): FramePaint | undefined => {
 		if (width < FINAL_RESPONSE_FRAME_MIN_WIDTH || !sources) return undefined;
-		if (!shouldFrame(component, isStyleActive)) return undefined;
-		// live 组件原生永标 streaming：只认结算标记；回放组件走 !isStreaming。
-		if (component.isStreaming !== false && !finality.isFramed(component)) return undefined;
+		if (!isStyleActive() || isTranscriptComponent(component) || !canCopyResponse(component))
+			return undefined;
 		return { theme: getTheme(), sources };
 	};
 
@@ -293,15 +301,7 @@ export function installFinalResponseFrame(
 			)
 				return undefined;
 			// 托管鼠标只有在 press 被处理后，才会在原地 release 时派发 click。
-			if (event.type === "click") {
-				const blocks = copyHit.message.content ?? [];
-				const text = blocks.flatMap((block) =>
-					block.type === "text" && typeof block.text === "string"
-						? [stripTerminalSequences(block.text)]
-						: [],
-				);
-				copyHit.copy(text.join("\n\n"));
-			}
+			if (event.type === "click") copyHit.copy(responseCopyText(copyHit.message));
 			return { handled: true };
 		}
 		if (event.y > rows) return undefined;
@@ -349,5 +349,6 @@ export function installFinalResponseFrame(
 		},
 		stageFinalCandidate: (message) => finality.stage(message),
 		confirmFinalResponses: (root, agentMessages) => finality.confirm(root, agentMessages),
+		canCopyResponse,
 	};
 }

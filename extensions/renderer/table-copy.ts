@@ -26,6 +26,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { walkComponentTree } from "../utils/component-tree.ts";
 import { isFullscreenTui } from "../utils/fullscreen-detect.ts";
+import { createClipboardWriter, type ClipboardWriter } from "./clipboard-actions.ts";
 import { codeSources } from "./markdown-code-source.ts";
 import {
 	type ActionHit,
@@ -71,9 +72,8 @@ export interface TableCopyInstallation {
 }
 
 interface TableCopyOwner extends TableCopyOptions {
-	copy: CopyText;
-	notify: Notify;
 	debug: (message: string) => void;
+	writer: ClipboardWriter;
 }
 
 interface MarkdownInternals {
@@ -308,31 +308,6 @@ const NO_INSTALLATION: TableCopyInstallation = {
 	dispose() {},
 };
 
-function copyText(
-	patch: Patch,
-	owner: TableCopyOwner,
-	text: string,
-	name: string,
-	errorLabel: string,
-): void {
-	const active = () => patch.owners.has(owner) && isFullscreenTui(owner.tui);
-	if (!active()) return;
-	void Promise.resolve()
-		.then(() => owner.copy(text))
-		.then(
-			() => {
-				if (active()) owner.notify(`Copied ${name}`, false);
-			},
-			(error) => {
-				if (active())
-					owner.notify(
-						`${errorLabel} copy failed: ${error instanceof Error ? error.message : String(error)}`,
-						true,
-					);
-			},
-		);
-}
-
 /**
  * Install only for a fullscreen owner. Shared wrappers stay inert after the last
  * owner releases them, even if another extension still holds a wrapper above us.
@@ -490,7 +465,7 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 				if (event.type === "press" && event.button === "left" && hit) return { handled: true };
 				if (event.type === "click" && event.button === "left" && hit) {
 					// Capture the clicked component's owner, never the newest session.
-					copyText(created, owner, hit.copy(), hit.name, hit.errorLabel);
+					owner.writer.write(hit.copy(), hit.name, hit.errorLabel);
 					return { handled: true };
 				}
 				return created.originalHandleMouse?.call(this, event);
@@ -504,16 +479,21 @@ export function installTableCopy(options: TableCopyOptions): TableCopyInstallati
 		target[PATCH] = created;
 		patch = created;
 	}
+	const held = patch;
+	const copy = options.copy ?? copyToClipboard;
+	const notify = options.notify ?? (() => {});
+	const writer = createClipboardWriter(
+		{ copy, notify },
+		() => held.owners.has(owner) && isFullscreenTui(owner.tui),
+	);
 	const owner: TableCopyOwner = {
 		...options,
-		copy: options.copy ?? copyToClipboard,
-		notify: options.notify ?? (() => {}),
 		debug,
+		writer,
 	};
 	patch.owners.add(owner);
 	invalidateMountedMarkdown(owner.tui);
-	const held = patch;
-	const responseCopy = (text: string) => copyText(held, owner, text, "response", "Response");
+	const responseCopy = (text: string) => writer.write(text, "response", "Response");
 	return {
 		noteSource(context, original, display = original) {
 			const frame = held.rendering;

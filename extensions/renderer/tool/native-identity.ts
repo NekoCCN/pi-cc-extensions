@@ -124,6 +124,19 @@ export function isNativeExplorationGroup(component: any): boolean {
 	);
 }
 
+/** Native groups project their existing cards through calls, not rendered screen rows. */
+export function nativeExplorationTools(component: unknown): readonly object[] | undefined {
+	if (typeof component !== "object" || component === null || !isNativeExplorationGroup(component))
+		return undefined;
+	const calls: unknown = Reflect.get(component, "calls");
+	return Array.isArray(calls)
+		? calls.flatMap((call) => {
+				const tool: unknown = call?.component;
+				return typeof tool === "object" && tool !== null ? [tool] : [];
+			})
+		: undefined;
+}
+
 /** Expanded flag shared by Pi (`expanded`) and native (`expanded` + snapshot state). */
 export function isToolExpanded(component: any): boolean {
 	if ((component as any)?.expanded === true) return true;

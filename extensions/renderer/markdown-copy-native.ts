@@ -6,10 +6,12 @@ import {
 } from "@earendil-works/pi-tui";
 import { codeTokenKey } from "./markdown-code-source.ts";
 import { CODE_LABEL } from "./markdown-copy-actions.ts";
+import type { MarkdownToken } from "./markdown-table-source.ts";
 
 export interface CopyFrame<Table> {
 	readonly tables: Table[];
 	codes?: ReadonlyMap<string, readonly string[]>;
+	readonly tokens?: MarkdownToken[];
 }
 
 interface NativeFrameOptions {
@@ -46,6 +48,7 @@ export class NativeMarkdownCopy<Table> {
 		let resolved = frame;
 		let quoteDepth = 0;
 		let listDepth = 0;
+		let renderDepth = 0;
 		if (typeof ownSources === "function") {
 			Reflect.set(component, "options", {
 				...options,
@@ -81,18 +84,16 @@ export class NativeMarkdownCopy<Table> {
 		}
 		Object.defineProperty(component, "renderToken", {
 			configurable: true,
-			value(
-				token: { readonly type: string; readonly raw?: string },
-				width: number,
-				next: string | undefined,
-				style: unknown,
-			) {
+			value(token: MarkdownToken, width: number, next: string | undefined, style: unknown) {
+				if (renderDepth === 0) frame.tokens?.push(token);
+				renderDepth++;
 				if (token.type === "blockquote") quoteDepth++;
 				if (token.type === "list") listDepth++;
 				let lines: string[];
 				try {
 					lines = renderToken.call(component, token, width, next, style);
 				} finally {
+					renderDepth--;
 					if (token.type === "blockquote") quoteDepth--;
 					if (token.type === "list") listDepth--;
 				}

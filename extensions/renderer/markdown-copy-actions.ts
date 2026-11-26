@@ -9,11 +9,28 @@ export function tableFormatName(format: TableFormat): string {
 	return format === "markdown" ? "Markdown" : format.toUpperCase();
 }
 
-interface ClipboardAction {
+export interface ClipboardAction {
 	readonly format: TableFormat | "code";
 	readonly name: string;
 	readonly errorLabel: string;
 	readonly copy: () => string;
+}
+
+export function codeCopyAction(body: string): ClipboardAction {
+	return { format: "code", name: "code", errorLabel: "Code", copy: () => body };
+}
+
+export function tableCopyAction<Table>(
+	table: Table,
+	format: TableFormat,
+	serialize: ActionSources<Table>["serialize"],
+): ClipboardAction {
+	return {
+		format,
+		name: `table as ${tableFormatName(format)}`,
+		errorLabel: "Table",
+		copy: () => serialize(table, format),
+	};
 }
 
 export interface ActionHit extends ClipboardAction {
@@ -67,16 +84,7 @@ export function bindActionRows<Table>(
 		if (table) {
 			for (const { format, mark } of formats) {
 				if (!line.includes(mark)) continue;
-				add(
-					mark,
-					{
-						format,
-						name: `table as ${tableFormatName(format)}`,
-						errorLabel: "Table",
-						copy: () => source.serialize(table, format),
-					},
-					bound,
-				);
+				add(mark, tableCopyAction(table, format, source.serialize), bound);
 			}
 		}
 		const codeStart = line.indexOf(codePrefix);
@@ -88,11 +96,7 @@ export function bindActionRows<Table>(
 		if (!bodies) continue;
 		const hits = codeHits.get(key) ?? [];
 		const body = bodies[hits.length];
-		add(
-			marker(`code:${key}`),
-			{ format: "code", name: "code", errorLabel: "Code", copy: () => body },
-			hits,
-		);
+		add(marker(`code:${key}`), codeCopyAction(body), hits);
 		codeHits.set(key, hits);
 	}
 	if (tableIndex + 1 !== source.tables.length) {

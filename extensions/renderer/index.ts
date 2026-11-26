@@ -124,6 +124,8 @@ export default function (
 ) {
 	// 可选 override：集成测试不依赖用户全局配置。
 	if (configOverride) setConfig(normalizeConfig({ ...config, ...configOverride }));
+	// Match the package's Markdown copy registration, which is fixed until reload.
+	const tablesEnabled = config.enableTableCopy;
 	const writeExecutionMetadata = new WriteExecutionMetadataStore();
 	const mouseOwner = {};
 	let installation:
@@ -273,7 +275,10 @@ export default function (
 		// 工具点击/回到底部适配仍需安装；保持在渲染层安装之后以维持原顺序。
 		if (ctx?.mode === "tui" && ctx?.hasUI) installToolMouseInteraction(ctx, mouseOwner);
 		// 浏览模式与鼠标交互同为输入监听，跟着一起装。
-		installTranscriptMode(ctx);
+		installTranscriptMode(ctx, {
+			tablesEnabled,
+			canCopyResponse: hooks?.finalResponseFrame.canCopyResponse,
+		});
 		if (!hooks) return;
 		hooks.toolGrouping.setTheme(ctx.ui.theme);
 		setMessageDisplayTheme(ctx.ui.theme);
@@ -299,7 +304,10 @@ export default function (
 		// Compaction rebuilds the transcript without session_start. Rebind after
 		// other TUI extensions may have replaced the root input dispatcher.
 		if (ctx?.mode === "tui" && ctx?.hasUI) installToolMouseInteraction(ctx, mouseOwner);
-		installTranscriptMode(ctx);
+		installTranscriptMode(ctx, {
+			tablesEnabled,
+			canCopyResponse: hooks?.finalResponseFrame.canCopyResponse,
+		});
 		if (!hooks) return;
 		hooks.toolGrouping.setTheme(ctx.ui.theme);
 		setMessageDisplayTheme(ctx.ui.theme);
